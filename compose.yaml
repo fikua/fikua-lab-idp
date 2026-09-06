@@ -1,0 +1,117 @@
+# Fikua Lab IdP — deployment
+#
+# Image: docker.io/fikua/fikua-lab-idp (published by the
+# fikua/fikua-lab-idp repo's release.yml on every published release /
+# push to main).
+#
+# Source of truth for this file:
+#   fikua-platform-iac/projects/fikua-lab-idp/compose.yaml
+#
+# A copy travels with the app repo at fikua-lab-idp/compose.yaml so
+# deploy.yml can push it to the host on every deploy — keep both in sync
+# (same convention as fikua-lab-issuer / niu / fikua-lab-attestation-registry).
+#
+# Host path on the VPS: /opt/vps/projects/fikua-lab-idp/
+#
+# In-memory only — no Postgres. Sessions (PAR requests, auth codes,
+# pending identifications, revoked jtis) live in
+# internal/session.Store, matching the design this was extracted from
+# (fikua-lab-issuer's own in-memory session store, before the split).
+# There is no DB URL in internal/config.Config, unlike fikua-lab-issuer,
+# which has its own dedicated Postgres instance.
+#
+# Same deployment shape as fikua-lab-issuer otherwise: direct hostname ->
+# Traefik -> container, no Tunnel, no Cloudflare Access, no Worker in
+# front. DNS-only (not Cloudflare-proxied), for the same FAPI 2.0 TLS
+# conformance reason as the issuer — see the traefik labels below and
+# fikua-platform-iac/tofu/cloudflare-fikua-com.tf.
+
+services:
+  fikua-lab-idp:
+    image: ${DOCKER_REGISTRY:-fikua}/fikua-lab-idp:${IDP_VERSION:-latest}
+    container_name: fikua-lab-idp
+    restart: unless-stopped
+    environment:
+      # This AS's own issuer identifier (`iss` of every access token,
+      # `aud` of every client-attestation PoP, `htu` every DPoP proof
+      # here must bind to).
+      FIKUA_BASE_URL: ${FIKUA_BASE_URL:-https://idp.fikua.com}
+      # The Credential Issuer this AS mints access tokens for (`aud` of
+      # every RFC 9068 access token).
+      FIKUA_CREDENTIAL_ISSUER_URL: ${FIKUA_CREDENTIAL_ISSUER_URL:-https://issuer.fikua.com}
+      # Where the identification UI's claim metadata comes from — same
+      # catalogue the Credential Issuer builds its
+      # credential_configurations_supported from.
+      FIKUA_ATTESTATION_REGISTRY_URL: ${FIKUA_ATTESTATION_REGISTRY_URL:-https://attestation-registry.fikua.com}
+      # Allowlist of attestation-registry scheme ids the identification
+      # form may render. Must agree with the Credential Issuer's own
+      # FIKUA_ISSUABLE_SCHEMES, or the form collects claims the issuer
+      # won't issue.
+      FIKUA_ISSUABLE_SCHEMES: ${FIKUA_ISSUABLE_SCHEMES:-urn:eudi:pid:1,urn:fikua:padro:barcelona:1}
+      # Holds idp-key.pem (required, no ephemeral fallback — see
+      # internal/crypto.LoadFromPEM's doc comment) and optionally
+      # root-ca.crt for Wallet Provider trust pinning. This is a file on
+      # disk, not a secret that travels through .env — see the volume
+      # mount below.
+      FIKUA_CERTS_DIR: /certs
+    volumes:
+      # idp-key.pem (and optionally root-ca.crt) must be placed here
+      # manually before first start — see this project's README,
+      # "First-time setup checklist". Not baked into the image, and not
+      # generated on the fly: see internal/crypto.LoadFromPEM's doc
+      # comment for why there is no ephemeral fallback.
+      - /opt/vps/projects/fikua-lab-idp/certs:/certs:ro
+    networks:
+      - traefik-public
+    labels:
+      # DNS-only A record (not Cloudflare-proxied) -> Traefik websecure
+      # (443) directly. Same rationale as fikua-lab-issuer: the OIDF
+      # conformance suite's FAPI 2.0 TLS checks (FAPI2-SP-FINAL-5.2.2)
+      # fail against Cloudflare's edge cipher suites, and this zone
+      # doesn't have the paid Advanced Certificate Manager add-on needed
+      # to restrict them (see
+      # fikua-platform-iac/tofu/cloudflare-fikua-com.tf and
+      # cloudflare-fikua-com-tls.tf). DNS-only makes Traefik negotiate
+      # TLS directly, which already enforces BCP195 cipher suites for
+      # free (see platform-services/traefik/dynamic/tls-options.yml).
+      # This AS now serves /par, /authorize, /token directly (they used
+      # to live behind issuer.fikua.com before the split), so the same
+      # conformance requirement applies here.
+      #
+      # tls.certresolver is explicit here (unlike relying on the
+      # entryPoint's own wildcard domain — see fikua-lab-issuer's
+      # compose.yaml comment for the DEFAULT CERT trap that leaving it
+      # implicit caused there).
+      traefik.enable: "true"
+      traefik.http.routers.fikua-lab-idp.rule: "Host(`idp.fikua.com`)"
+      traefik.http.routers.fikua-lab-idp.entrypoints: "websecure"
+      traefik.http.routers.fikua-lab-idp.tls: "true"
+      traefik.http.routers.fikua-lab-idp.tls.certresolver: "cloudflare"
+      traefik.http.routers.fikua-lab-idp.service: "fikua-lab-idp"
+      traefik.http.services.fikua-lab-idp.loadbalancer.server.port: "8080"
+      # Rate limit: mirrors fikua-lab-issuer's. sourcecriterion.requestheadername
+      # is REQUIRED — without it the limiter sees rotating Cloudflare edge
+      # IPs (the ratelimit middleware runs before the
+      # forwardedHeaders/X-Forwarded-For rewrite) and never fires.
+      traefik.http.routers.fikua-lab-idp.middlewares: "fikua-lab-idp-ratelimit"
+      traefik.http.middlewares.fikua-lab-idp-ratelimit.ratelimit.average: "60"
+      traefik.http.middlewares.fikua-lab-idp-ratelimit.ratelimit.period: "1m"
+      traefik.http.middlewares.fikua-lab-idp-ratelimit.ratelimit.burst: "100"
+      traefik.http.middlewares.fikua-lab-idp-ratelimit.ratelimit.sourcecriterion.requestheadername: "Cf-Connecting-Ip"
+    deploy:
+      resources:
+        limits:
+          memory: 64M
+          cpus: '0.5'
+    logging:
+      driver: json-file
+      options:
+        max-size: "25m"
+        max-file: "3"
+
+networks:
+  # Shared L7 fabric owned by platform-services — joined for Traefik
+  # routing.
+  traefik-public:
+    name: traefik-public
+    external: true

@@ -1,0 +1,162 @@
+name: Deploy IdP to VPS
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: 'Docker image tag to deploy (defaults to "latest")'
+        required: false
+        default: 'latest'
+        type: string
+  release:
+    types: [published]
+
+# Don't run two deploys at once against the same VPS.
+concurrency:
+  group: deploy-fikua-lab-idp-prd
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Deploy ${{ inputs.image_tag || github.event.release.tag_name || 'latest' }} to prd
+    runs-on: ubuntu-latest
+    # The 'prd' environment is configured with required reviewers in
+    # Settings -> Environments -> prd. Until somebody approves the run,
+    # the job stays paused, so an autotrigger from a release publish
+    # does not ship to production unsupervised.
+    #
+    # IMPORTANT: this environment's url assumes DNS for idp.fikua.com is
+    # already pointed at the VPS (see
+    # fikua-platform-iac/projects/fikua-lab-idp/README.md, "First-time
+    # setup checklist").
+    environment:
+      name: prd
+      url: https://idp.fikua.com/health
+
+    steps:
+      - name: Checkout (for the compose file)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Install cloudflared
+        run: |
+          curl --proto '=https' --tlsv1.2 -fsSL \
+            https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 \
+            -o /usr/local/bin/cloudflared
+          chmod +x /usr/local/bin/cloudflared
+          cloudflared --version
+
+      - name: Configure SSH client (tunnel + key + known_hosts)
+        env:
+          VPS_SSH_PRIVATE_KEY: ${{ secrets.VPS_SSH_PRIVATE_KEY }}
+          CF_ACCESS_CLIENT_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}
+          CF_ACCESS_CLIENT_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
+        run: |
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+
+          printf '%s\n' "$VPS_SSH_PRIVATE_KEY" > ~/.ssh/vps_id
+          chmod 600 ~/.ssh/vps_id
+          ssh-keygen -y -f ~/.ssh/vps_id >/dev/null
+
+          cat <<'EOF' > ~/.ssh/config
+          Host vps.fikua.com
+              User ubuntu
+              IdentityFile ~/.ssh/vps_id
+              IdentitiesOnly yes
+              StrictHostKeyChecking accept-new
+              ProxyCommand cloudflared access ssh --hostname %h
+              ServerAliveInterval 30
+              ServerAliveCountMax 4
+          EOF
+          chmod 600 ~/.ssh/config
+
+          echo "CF_ACCESS_CLIENT_ID=$CF_ACCESS_CLIENT_ID" >> "$GITHUB_ENV"
+          echo "CF_ACCESS_CLIENT_SECRET=$CF_ACCESS_CLIENT_SECRET" >> "$GITHUB_ENV"
+
+      - name: Write config vars into .env on the VPS (merge, not overwrite)
+        # Unlike fikua-lab-issuer, this service has no env-var *secrets* to
+        # write: its only "secret" is idp-key.pem, a file on the VPS
+        # filesystem (see internal/crypto.LoadFromPEM — there is no
+        # ephemeral fallback), not something that travels through .env.
+        # This step exists to keep FIKUA_BASE_URL/FIKUA_CREDENTIAL_ISSUER_URL/
+        # FIKUA_ATTESTATION_REGISTRY_URL/FIKUA_ISSUABLE_SCHEMES current from
+        # the "prd" environment's Variables (all public URLs/allowlists, not
+        # credentials — hence vars, not secrets), the same
+        # merge-rather-than-replace shape as fikua-lab-issuer's deploy.yml
+        # so any other line already in .env (e.g. one hand-added for
+        # incident recovery) survives a re-run untouched.
+        env:
+          FIKUA_BASE_URL: ${{ vars.FIKUA_BASE_URL }}
+          FIKUA_CREDENTIAL_ISSUER_URL: ${{ vars.FIKUA_CREDENTIAL_ISSUER_URL }}
+          FIKUA_ATTESTATION_REGISTRY_URL: ${{ vars.FIKUA_ATTESTATION_REGISTRY_URL }}
+          FIKUA_ISSUABLE_SCHEMES: ${{ vars.FIKUA_ISSUABLE_SCHEMES }}
+        run: |
+          set -e
+          ssh vps.fikua.com 'sudo mkdir -p /opt/vps/projects/fikua-lab-idp'
+          ssh vps.fikua.com 'sudo bash -s' <<REMOTE_SCRIPT
+          set -e
+          ENV_FILE=/opt/vps/projects/fikua-lab-idp/.env
+          touch "\$ENV_FILE"
+          grep -v -E '^(FIKUA_BASE_URL=|FIKUA_CREDENTIAL_ISSUER_URL=|FIKUA_ATTESTATION_REGISTRY_URL=|FIKUA_ISSUABLE_SCHEMES=)' "\$ENV_FILE" > "\$ENV_FILE.tmp" || true
+          {
+            cat "\$ENV_FILE.tmp"
+            echo "FIKUA_BASE_URL=$FIKUA_BASE_URL"
+            echo "FIKUA_CREDENTIAL_ISSUER_URL=$FIKUA_CREDENTIAL_ISSUER_URL"
+            echo "FIKUA_ATTESTATION_REGISTRY_URL=$FIKUA_ATTESTATION_REGISTRY_URL"
+            echo "FIKUA_ISSUABLE_SCHEMES=$FIKUA_ISSUABLE_SCHEMES"
+          } > "\$ENV_FILE"
+          rm -f "\$ENV_FILE.tmp"
+          chmod 600 "\$ENV_FILE"
+          chown ubuntu:ubuntu "\$ENV_FILE"
+          REMOTE_SCRIPT
+
+      - name: Copy compose.yaml from platform-iac source of truth
+        # The compose file lives in fikua-platform-iac, but to keep this
+        # workflow self-contained we ship the same file alongside the app
+        # under compose.yaml; if it isn't present yet we fall back to
+        # whatever is already on the VPS.
+        run: |
+          if [ -f compose.yaml ]; then
+            scp compose.yaml vps.fikua.com:/tmp/fikua-lab-idp-compose.yaml
+            ssh vps.fikua.com 'sudo mkdir -p /opt/vps/projects/fikua-lab-idp && sudo cp /tmp/fikua-lab-idp-compose.yaml /opt/vps/projects/fikua-lab-idp/compose.yaml && sudo chown ubuntu:ubuntu /opt/vps/projects/fikua-lab-idp/compose.yaml'
+          else
+            echo "::notice::compose.yaml not present in the app repo — keeping the on-host compose file as is."
+          fi
+
+      - name: Pull and restart on the VPS
+        env:
+          IMAGE_TAG: ${{ inputs.image_tag || github.event.release.tag_name || 'latest' }}
+        run: |
+          NORMALISED_TAG="${IMAGE_TAG#v}"
+          echo "Deploying fikua/fikua-lab-idp:$NORMALISED_TAG"
+          ssh vps.fikua.com "
+            set -e
+            cd /opt/vps/projects/fikua-lab-idp
+            IDP_VERSION='$NORMALISED_TAG' sudo --preserve-env=IDP_VERSION docker compose pull fikua-lab-idp
+            IDP_VERSION='$NORMALISED_TAG' sudo --preserve-env=IDP_VERSION docker compose up -d
+          "
+
+      - name: Wait for /health to report ok
+        # The image is built FROM scratch (no shell, no curl/wget inside
+        # the container), and the container publishes no host port beyond
+        # the 127.0.0.1-bound one — reach it by sharing its network
+        # namespace from a throwaway curl container instead of `docker exec`
+        # (same trick as fikua-lab-issuer's deploy.yml).
+        run: |
+          for i in $(seq 1 30); do
+            body=$(ssh vps.fikua.com 'sudo docker run --rm --network container:fikua-lab-idp curlimages/curl:latest -sf http://127.0.0.1:8080/health' || true)
+            echo "attempt $i: $body" | head -c 400
+            echo
+            if echo "$body" | grep -q '"status":"ok"'; then
+              echo "/health is ok"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "/health did not report ok within 150s"
+          exit 1
+
+      - name: Smoke-test through Traefik (Host header)
+        run: |
+          ssh vps.fikua.com \
+            'curl -sIk -H "Host: idp.fikua.com" https://127.0.0.1/health | head -5'
