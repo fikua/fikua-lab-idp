@@ -98,6 +98,12 @@ replicate.
 make build        # bin/idp, static binary, no CGO
 ```
 
+## Docs
+
+- [Issuer trust validation: LOTL and LoTE](docs/issuer-trust-validation.md) —
+  what's needed to validate a presented credential's issuer against the
+  EU's real trust infrastructure, and why it isn't built yet.
+
 ## License
 
 Apache-2.0. See [LICENSE](LICENSE).
