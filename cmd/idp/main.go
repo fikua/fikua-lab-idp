@@ -102,11 +102,7 @@ func loadVerifier(cfg config.Config, sessions *session.Store) (*verifier.Service
 	if err != nil {
 		return nil, err
 	}
-	encryptionKey, err := fikuacrypto.GenerateResponseEncryptionKey()
-	if err != nil {
-		return nil, err
-	}
-	log.Printf("OID4VP Verifier ready (request signing kid=%s, response encryption kid=%s)", signingKey.KID(), encryptionKey.KID())
+	log.Printf("OID4VP Verifier ready (request signing kid=%s)", signingKey.KID())
 
-	return verifier.NewService(cfg.VerifierBaseURL, signingKey, encryptionKey, sessions, ""), nil
+	return verifier.NewService(cfg.VerifierBaseURL, signingKey, sessions, ""), nil
 }

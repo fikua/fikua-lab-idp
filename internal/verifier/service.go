@@ -66,10 +66,9 @@ const requestObjectTTL = 5 * time.Minute
 // internal/authz.Service's shape: a struct of injected dependencies and one
 // method per endpoint, with no HTTP types crossing the boundary.
 type Service struct {
-	baseURL       string
-	signingKey    *fikuacrypto.RequestSigningKey
-	encryptionKey *fikuacrypto.ResponseEncryptionKey
-	sessions      *session.Store
+	baseURL    string
+	signingKey *fikuacrypto.RequestSigningKey
+	sessions   *session.Store
 	// responseMode is fixed per deployment rather than per session. HAIP
 	// §5 mandates encrypted responses, so direct_post.jwt is the intended
 	// value; plain direct_post stays reachable for interop debugging
@@ -81,19 +80,22 @@ type Service struct {
 // visible origin — its host becomes the client_id wallets check the
 // Request Object's certificate against, and it prefixes the request_uri and
 // response_uri wallets call back on. signingKey signs the Request Object
-// (see crypto.RequestSigningKey on why it must be a DSS-held key);
-// encryptionKey decrypts direct_post.jwt responses and is published in
-// client_metadata.
-func NewService(baseURL string, signingKey *fikuacrypto.RequestSigningKey, encryptionKey *fikuacrypto.ResponseEncryptionKey, sessions *session.Store, responseMode string) *Service {
+// (see crypto.RequestSigningKey on why it must be a DSS-held key). A
+// response-encryption key is no longer a Service-level dependency: OID4VP
+// §8.3 / HAIP §5.5 require a fresh one per Authorization Request, so
+// CreateSession generates one per session instead (see
+// session.VerificationSession.EncryptionKey) — a single key reused across
+// every session's client_metadata failed OIDF's
+// VP1FinalCheckEncryptionKeyNotReused.
+func NewService(baseURL string, signingKey *fikuacrypto.RequestSigningKey, sessions *session.Store, responseMode string) *Service {
 	if responseMode == "" {
 		responseMode = ResponseModeDirectPostJWT
 	}
 	return &Service{
-		baseURL:       baseURL,
-		signingKey:    signingKey,
-		encryptionKey: encryptionKey,
-		sessions:      sessions,
-		responseMode:  responseMode,
+		baseURL:      baseURL,
+		signingKey:   signingKey,
+		sessions:     sessions,
+		responseMode: responseMode,
 	}
 }
 
@@ -130,7 +132,17 @@ func (s *Service) CreateSession(req CreateSessionRequest) (CreateSessionResult, 
 	if err != nil {
 		return CreateSessionResult{}, err
 	}
-	clientMetadata, err := s.buildClientMetadata(mdoc)
+
+	var encryptionKey *fikuacrypto.ResponseEncryptionKey
+	if s.responseMode == ResponseModeDirectPostJWT {
+		// Fresh per session — see NewService's doc comment on why this
+		// can no longer live on the Service itself.
+		encryptionKey, err = fikuacrypto.GenerateResponseEncryptionKey()
+		if err != nil {
+			return CreateSessionResult{}, err
+		}
+	}
+	clientMetadata, err := s.buildClientMetadata(mdoc, encryptionKey)
 	if err != nil {
 		return CreateSessionResult{}, err
 	}
@@ -157,15 +169,16 @@ func (s *Service) CreateSession(req CreateSessionRequest) (CreateSessionResult, 
 	}
 
 	s.sessions.StoreVerification(session.VerificationSession{
-		SessionID:    sessionID,
-		State:        state,
-		Nonce:        nonce,
-		DCQLQuery:    dcql,
-		ResponseMode: s.responseMode,
-		ClientID:     clientID,
-		ResponseURI:  responseURI,
-		RequestJWT:   requestJWT,
-		Status:       "pending",
+		SessionID:     sessionID,
+		State:         state,
+		Nonce:         nonce,
+		DCQLQuery:     dcql,
+		ResponseMode:  s.responseMode,
+		ClientID:      clientID,
+		ResponseURI:   responseURI,
+		RequestJWT:    requestJWT,
+		EncryptionKey: encryptionKey,
+		Status:        "pending",
 	})
 
 	return CreateSessionResult{
@@ -235,17 +248,35 @@ func errorResult(code, description string) Result {
 // that never touches a session.
 func (s *Service) HandleResponse(ctx context.Context, req ResponseRequest) (Result, session.VerificationSession, error) {
 	vpToken, state := req.VPToken, req.State
+	var v session.VerificationSession
 
 	if req.Response != "" {
-		// direct_post.jwt: state and vp_token are inside the JWE, so it has
-		// to be decrypted before any session can be resolved.
-		decrypted, err := s.decryptResponse(req.Response)
+		// direct_post.jwt: state and vp_token are inside the JWE. The
+		// session — and so its own response-encryption private key — has
+		// to be found first, via the kid the JWE names, since a single
+		// shared key would fail OID4VP §8.3/HAIP §5.5's "fresh key per
+		// Authorization Request" (see session.VerificationSession.
+		// EncryptionKey's doc comment).
+		kid, err := fikuacrypto.PeekResponseEncryptionKID(req.Response)
+		if err != nil {
+			return errorResult("invalid_request", err.Error()), session.VerificationSession{}, nil
+		}
+		found, ok := s.sessions.FindVerificationByEncryptionKID(kid)
+		if !ok {
+			return errorResult("invalid_request", "Unknown or expired encryption key"), session.VerificationSession{}, nil
+		}
+		v = found
+
+		decrypted, err := decryptResponse(v.EncryptionKey, req.Response)
 		if err != nil {
 			return errorResult("invalid_request", err.Error()), session.VerificationSession{}, nil
 		}
 		vpToken, state = decrypted.vpToken, decrypted.state
 		if state == "" || vpToken == "" {
 			return errorResult("invalid_request", "Decrypted response is missing state or vp_token"), session.VerificationSession{}, nil
+		}
+		if state != v.State {
+			return errorResult("invalid_request", "Decrypted state does not match this encryption key's session"), session.VerificationSession{}, nil
 		}
 	} else {
 		if state == "" {
@@ -254,11 +285,11 @@ func (s *Service) HandleResponse(ctx context.Context, req ResponseRequest) (Resu
 		if vpToken == "" {
 			return Result{}, session.VerificationSession{}, oauth2.BadRequest(oauth2.InvalidRequest, "Missing vp_token or response parameter")
 		}
-	}
-
-	v, ok := s.sessions.FindVerificationByState(state)
-	if !ok {
-		return errorResult("invalid_request", "Unknown or expired state parameter"), session.VerificationSession{}, nil
+		found, ok := s.sessions.FindVerificationByState(state)
+		if !ok {
+			return errorResult("invalid_request", "Unknown or expired state parameter"), session.VerificationSession{}, nil
+		}
+		v = found
 	}
 
 	claims, err := s.verifyPresentation(ctx, v, vpToken)
@@ -288,7 +319,7 @@ func (s *Service) verifyPresentation(ctx context.Context, v session.Verification
 			// key only when the response was actually encrypted. Passing it
 			// for an unencrypted response would fail every signature.
 			var err error
-			thumbprint, err = s.encryptionKey.ThumbprintSHA256()
+			thumbprint, err = v.EncryptionKey.ThumbprintSHA256()
 			if err != nil {
 				return nil, err
 			}
@@ -319,8 +350,8 @@ type decryptedResponse struct {
 	state   string
 }
 
-func (s *Service) decryptResponse(jwe string) (decryptedResponse, error) {
-	plaintext, err := s.encryptionKey.Decrypt(jwe)
+func decryptResponse(key *fikuacrypto.ResponseEncryptionKey, jwe string) (decryptedResponse, error) {
+	plaintext, err := key.Decrypt(jwe)
 	if err != nil {
 		return decryptedResponse{}, fmt.Errorf("failed to decrypt response: %w", err)
 	}
@@ -416,9 +447,11 @@ func (s *Service) certHash() (string, error) {
 
 // buildClientMetadata assembles the client_metadata carried in the Request
 // Object. vp_formats_supported is always present (OID4VP §5.1 requires it),
-// and an encrypted response mode adds the response-encryption key and the
-// content-encryption methods HAIP §5 requires be advertised.
-func (s *Service) buildClientMetadata(mdoc bool) (map[string]any, error) {
+// and an encrypted response mode adds encryptionKey's public JWK and the
+// content-encryption methods HAIP §5 requires be advertised. encryptionKey
+// is this session's own — see CreateSession — never nil when the Service's
+// responseMode is direct_post.jwt.
+func (s *Service) buildClientMetadata(mdoc bool, encryptionKey *fikuacrypto.ResponseEncryptionKey) (map[string]any, error) {
 	vpFormats := map[string]any{}
 	if mdoc {
 		// mso_mdoc advertises COSE algorithm identifiers, where ES256 is -7
@@ -434,7 +467,7 @@ func (s *Service) buildClientMetadata(mdoc bool) (map[string]any, error) {
 	metadata := map[string]any{"vp_formats_supported": vpFormats}
 
 	if s.responseMode == ResponseModeDirectPostJWT {
-		publicJWK, err := s.encryptionKey.PublicJWK()
+		publicJWK, err := encryptionKey.PublicJWK()
 		if err != nil {
 			return nil, err
 		}

@@ -101,6 +101,20 @@ func (k *ResponseEncryptionKey) PublicJWK() (map[string]any, error) {
 	return out, nil
 }
 
+// PeekResponseEncryptionKID reads the `kid` a wallet's direct_post.jwt JWE
+// names, without decrypting it — each verification session now has its own
+// response-encryption key (see GenerateResponseEncryptionKey's callers), so
+// the session has to be identified before it is known which private key to
+// even attempt decryption with.
+func PeekResponseEncryptionKID(compactJWE string) (string, error) {
+	msg, err := jwe.ParseString(compactJWE)
+	if err != nil {
+		return "", fmt.Errorf("crypto: parsing direct_post.jwt response: %w", err)
+	}
+	kid, _ := msg.ProtectedHeaders().KeyID()
+	return kid, nil
+}
+
 // Decrypt decrypts a compact JWE produced by a wallet for direct_post.jwt,
 // returning the plaintext payload (the JSON carrying vp_token, state, …).
 func (k *ResponseEncryptionKey) Decrypt(compactJWE string) ([]byte, error) {

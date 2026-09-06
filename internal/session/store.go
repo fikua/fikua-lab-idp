@@ -19,6 +19,8 @@ import (
 	"encoding/base64"
 	"sync"
 	"time"
+
+	fikuacrypto "github.com/fikua/fikua-lab-idp/internal/crypto"
 )
 
 // Data is the state bound to an authorization code.
@@ -63,8 +65,9 @@ type Store struct {
 	// This does mean one process holds both roles' state; if the Verifier
 	// ever splits into its own service (as the AS split out of the
 	// issuer), this is the seam to cut along.
-	verifications         map[string]*VerificationSession
-	verificationIDByState map[string]string
+	verifications          map[string]*VerificationSession
+	verificationIDByState  map[string]string
+	verificationIDByEncKID map[string]string
 }
 
 // VerificationSession is one OID4VP verification: the Authorization
@@ -89,6 +92,14 @@ type VerificationSession struct {
 	ClientID     string
 	ResponseURI  string
 	RequestJWT   string
+	// EncryptionKey is this session's own response-encryption keypair
+	// (nil unless ResponseMode is direct_post.jwt). OID4VP §8.3 / HAIP
+	// §5.5 require a Verifier supply an ephemeral key specific to each
+	// Authorization Request — a key held on the Service and reused
+	// across sessions failed VP1FinalCheckEncryptionKeyNotReused in OIDF
+	// conformance testing, since the same public key showed up in two
+	// different requests' client_metadata.
+	EncryptionKey *fikuacrypto.ResponseEncryptionKey
 	// Status is one of: pending, request_sent, verified, failed.
 	Status         string
 	VPToken        string
@@ -176,8 +187,9 @@ func NewStore() *Store {
 		issuedJTIByCode:    make(map[string]string),
 		revokedJTIs:        make(map[string]time.Time),
 
-		verifications:         make(map[string]*VerificationSession),
-		verificationIDByState: make(map[string]string),
+		verifications:          make(map[string]*VerificationSession),
+		verificationIDByState:  make(map[string]string),
+		verificationIDByEncKID: make(map[string]string),
 	}
 }
 
@@ -189,6 +201,9 @@ func (s *Store) StoreVerification(v VerificationSession) {
 	s.mu.Lock()
 	s.verifications[v.SessionID] = &v
 	s.verificationIDByState[v.State] = v.SessionID
+	if v.EncryptionKey != nil {
+		s.verificationIDByEncKID[v.EncryptionKey.KID()] = v.SessionID
+	}
 	s.mu.Unlock()
 }
 
@@ -216,6 +231,21 @@ func (s *Store) FindVerificationByState(state string) (VerificationSession, bool
 	return s.findVerificationLocked(sessionID)
 }
 
+// FindVerificationByEncryptionKID resolves a direct_post.jwt response's own
+// JWE `kid` (crypto.PeekResponseEncryptionKID) to its session — needed
+// because each session now carries its own response-encryption key, so the
+// session has to be known before it is known which private key to try
+// decrypting with. Same expiry semantics as FindVerification.
+func (s *Store) FindVerificationByEncryptionKID(kid string) (VerificationSession, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	sessionID, ok := s.verificationIDByEncKID[kid]
+	if !ok {
+		return VerificationSession{}, false
+	}
+	return s.findVerificationLocked(sessionID)
+}
+
 // findVerificationLocked is FindVerification's body; callers hold s.mu.
 func (s *Store) findVerificationLocked(sessionID string) (VerificationSession, bool) {
 	v, ok := s.verifications[sessionID]
@@ -232,6 +262,9 @@ func (s *Store) findVerificationLocked(sessionID string) (VerificationSession, b
 func (s *Store) deleteVerificationLocked(v *VerificationSession) {
 	delete(s.verifications, v.SessionID)
 	delete(s.verificationIDByState, v.State)
+	if v.EncryptionKey != nil {
+		delete(s.verificationIDByEncKID, v.EncryptionKey.KID())
+	}
 }
 
 // UpdateVerificationStatus advances a live session's status (pending →
