@@ -105,7 +105,7 @@ func (h *Handler) oid4vpResponse(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	result, session, err := h.verifier.HandleResponse(verifier.ResponseRequest{
+	result, session, err := h.verifier.HandleResponse(r.Context(), verifier.ResponseRequest{
 		VPToken:  form["vp_token"],
 		State:    form["state"],
 		Response: form["response"],

@@ -14,11 +14,11 @@
 package verifier
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"net/url"
 	"strings"
 	"time"
 
@@ -27,6 +27,7 @@ import (
 	"github.com/fikua/fikua-lab-idp/internal/oauth2"
 	"github.com/fikua/fikua-lab-idp/internal/sdjwtverify"
 	"github.com/fikua/fikua-lab-idp/internal/session"
+	"github.com/fikua/fikua-lab-idp/internal/statuslistcheck"
 )
 
 // APIPrefix is where this Verifier's wallet- and frontend-facing endpoints
@@ -232,7 +233,7 @@ func errorResult(code, description string) Result {
 // must be able to show "that presentation was rejected, and why"), while a
 // malformed *request* — no state, no vp_token — is a plain protocol error
 // that never touches a session.
-func (s *Service) HandleResponse(req ResponseRequest) (Result, session.VerificationSession, error) {
+func (s *Service) HandleResponse(ctx context.Context, req ResponseRequest) (Result, session.VerificationSession, error) {
 	vpToken, state := req.VPToken, req.State
 
 	if req.Response != "" {
@@ -260,7 +261,7 @@ func (s *Service) HandleResponse(req ResponseRequest) (Result, session.Verificat
 		return errorResult("invalid_request", "Unknown or expired state parameter"), session.VerificationSession{}, nil
 	}
 
-	claims, err := s.verifyPresentation(v, vpToken)
+	claims, err := s.verifyPresentation(ctx, v, vpToken)
 	if err != nil {
 		s.sessions.UpdateVerificationResult(v.SessionID, "failed", vpToken, nil, err.Error())
 		return errorResult("invalid_presentation", err.Error()), v, nil
@@ -270,11 +271,16 @@ func (s *Service) HandleResponse(req ResponseRequest) (Result, session.Verificat
 	return successResult(claims), v, nil
 }
 
-// verifyPresentation dispatches to the format-specific verifier. The format
-// comes off the session's own stored DCQL query, never off the response: a
-// wallet must answer the question that was asked, not pick the format whose
+// verifyPresentation dispatches to the format-specific verifier, then —
+// for a credential that carries one — checks the presented credential's
+// own Token Status List reference. HAIP §7 point 2.2.2.2 requires this
+// fetch actually happen, not just that the presentation's signatures
+// check out; a revoked credential's signature is still valid, that's the
+// whole reason a separate status check exists. The format comes off the
+// session's own stored DCQL query, never off the response: a wallet must
+// answer the question that was asked, not pick the format whose
 // verification it prefers.
-func (s *Service) verifyPresentation(v session.VerificationSession, vpToken string) (map[string]any, error) {
+func (s *Service) verifyPresentation(ctx context.Context, v session.VerificationSession, vpToken string) (map[string]any, error) {
 	if sessionFormat(v) == FormatMsoMdoc {
 		var thumbprint []byte
 		if v.ResponseMode == ResponseModeDirectPostJWT {
@@ -287,9 +293,24 @@ func (s *Service) verifyPresentation(v session.VerificationSession, vpToken stri
 				return nil, err
 			}
 		}
+		// mdoc status-list checking is not yet wired up here — this
+		// Verifier's OIDF coverage so far only exercises the SD-JWT VC
+		// path (docs/issuer-trust-validation.md tracks the analogous
+		// issuer-trust gap; this is the same kind of "ported the
+		// crypto, not yet every HAIP consequence of it" gap for mdoc).
 		return mdocverify.Verify(vpToken, sessionDocType(v), v.ClientID, v.Nonce, thumbprint, v.ResponseURI, nil)
 	}
-	return sdjwtverify.Verify(vpToken, v.ClientID, v.Nonce)
+
+	claims, status, err := sdjwtverify.VerifyWithStatus(vpToken, v.ClientID, v.Nonce)
+	if err != nil {
+		return nil, err
+	}
+	if ref, ok := statuslistcheck.ParseRef(status); ok {
+		if err := statuslistcheck.CheckValid(ctx, ref); err != nil {
+			return nil, err
+		}
+	}
+	return claims, nil
 }
 
 // decryptedResponse is the plaintext of a direct_post.jwt JWE.
@@ -365,39 +386,32 @@ func (s *Service) ResultURI(sessionID string) string {
 	return s.baseURL + APIPrefix + "/result/" + sessionID
 }
 
-// clientID is this Verifier's OID4VP Client Identifier. The `x509_san_dns:`
-// prefix (OID4VP §5.10) tells the wallet to authenticate the request by
-// checking the Request Object's x5c leaf has this DNS name in its SAN —
-// which is the whole reason the signing key has to be a real DSS-issued
-// certificate and not a local self-signed one.
+// clientID is this Verifier's OID4VP Client Identifier. HAIP §5 is
+// explicit and leaves no alternative: "For signed requests, the Verifier
+// MUST use, and the Wallet MUST accept the Client Identifier Prefix
+// x509_hash as defined in Section 5.9.3 of [OID4VP]" — not x509_san_dns,
+// which OID4VP §5.9.3 defines as a separate, valid-but-not-HAIP-mandated
+// scheme. Confirmed against an OIDF conformance run: a client_id of
+// x509_san_dns:<host> made ExtractAndValidateX509HashClientId fail even
+// though the x5c chain and signature both validated correctly — the test
+// expects the hash scheme specifically, matching the spec text above.
 func (s *Service) clientID() (string, error) {
-	host, err := hostOf(s.baseURL)
-	if err != nil {
-		return "", err
-	}
-	return "x509_san_dns:" + host, nil
+	return s.certHash()
 }
 
-// certHash is base64url(SHA-256(leaf DER)), the value an `x509_hash:`
-// client_id carries (OID4VP §5.10). Not used to build this Verifier's own
-// client_id — x509_san_dns is the HAIP-profile choice — but kept because it
-// is the one client-identifier value derivable from the signing key alone,
-// and a wallet that only supports x509_hash needs it.
+// certHash is `x509_hash:` plus base64url(SHA-256(leaf DER)) — this
+// Verifier's Client Identifier per HAIP §5 / OID4VP §5.9.3. Derived from
+// the signing key alone, which is why that key has to be a real
+// DSS-issued certificate: a self-signed one would make every session's
+// client_id valid only to a wallet that already trusts this exact
+// throwaway cert.
 func (s *Service) certHash() (string, error) {
 	der := s.signingKey.LeafDER()
 	if len(der) == 0 {
 		return "", fmt.Errorf("verifier: x509_hash client_id requires a certificate, but the signing key has no x5c chain")
 	}
 	sum := sha256.Sum256(der)
-	return base64.RawURLEncoding.EncodeToString(sum[:]), nil
-}
-
-func hostOf(rawURL string) (string, error) {
-	u, err := url.Parse(rawURL)
-	if err != nil || u.Host == "" {
-		return "", fmt.Errorf("verifier: %q is not a usable base URL", rawURL)
-	}
-	return u.Hostname(), nil
+	return "x509_hash:" + base64.RawURLEncoding.EncodeToString(sum[:]), nil
 }
 
 // buildClientMetadata assembles the client_metadata carried in the Request

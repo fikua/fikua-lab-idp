@@ -65,27 +65,42 @@ func failf(format string, args ...any) error {
 // certchain.Validate for why that is conformance-testing behaviour and what
 // closing the gap would take.
 func Verify(presentation, expectedAud, expectedNonce string) (map[string]any, error) {
+	claims, _, err := VerifyWithStatus(presentation, expectedAud, expectedNonce)
+	return claims, err
+}
+
+// VerifyWithStatus is Verify plus the issuer JWT's own "status" claim
+// (IETF Token Status List, draft-ietf-oauth-status-list-21 §6.2's
+// {status_list: {idx, uri}}), so a caller can fetch and check the
+// credential's revocation state — HAIP §7 point 2.2.2.2 requires the
+// Verifier do this, not just validate the presentation's signatures.
+// status is nil when the issuer JWT carries no "status" claim at all
+// (unusual for this ecosystem's own issuer, but not itself a reason to
+// reject a presentation — an issuer that opts out of revocation is a
+// policy question, not a cryptographic failure).
+func VerifyWithStatus(presentation, expectedAud, expectedNonce string) (claims map[string]any, status map[string]any, err error) {
 	parsed, err := parse(presentation)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	issuerClaims, err := verifyIssuerSignature(parsed.issuerJWT)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if err := verifyDisclosureDigests(parsed.disclosures, issuerClaims); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if err := verifyKeyBinding(parsed, issuerClaims, presentation, expectedAud, expectedNonce); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
-	claims := make(map[string]any, len(parsed.disclosures))
+	claims = make(map[string]any, len(parsed.disclosures))
 	for _, d := range parsed.disclosures {
 		claims[d.claimName] = d.claimValue
 	}
-	return claims, nil
+	status, _ = issuerClaims["status"].(map[string]any)
+	return claims, status, nil
 }
 
 // presentationParts is a parsed SD-JWT compact serialization:
