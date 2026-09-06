@@ -74,22 +74,32 @@ jobs:
           echo "CF_ACCESS_CLIENT_SECRET=$CF_ACCESS_CLIENT_SECRET" >> "$GITHUB_ENV"
 
       - name: Write config vars into .env on the VPS (merge, not overwrite)
-        # Unlike fikua-lab-issuer, this service has no env-var *secrets* to
-        # write: its only "secret" is idp-key.pem, a file on the VPS
-        # filesystem (see internal/crypto.LoadFromPEM — there is no
-        # ephemeral fallback), not something that travels through .env.
-        # This step exists to keep FIKUA_BASE_URL/FIKUA_CREDENTIAL_ISSUER_URL/
-        # FIKUA_ATTESTATION_REGISTRY_URL/FIKUA_ISSUABLE_SCHEMES current from
-        # the "prd" environment's Variables (all public URLs/allowlists, not
-        # credentials — hence vars, not secrets), the same
-        # merge-rather-than-replace shape as fikua-lab-issuer's deploy.yml
-        # so any other line already in .env (e.g. one hand-added for
-        # incident recovery) survives a re-run untouched.
+        # This service's only *filesystem* secret is idp-key.pem (see
+        # internal/crypto.LoadFromPEM — there is no ephemeral fallback), not
+        # something that travels through .env. But since the OID4VP Verifier
+        # was added, it also needs the Fikua DSS connection — FIKUA_DSS_URL/
+        # FIKUA_DSS_CLIENT_ID/FIKUA_DSS_VERIFIER_CREDENTIAL_ID (public, hence
+        # vars) and FIKUA_DSS_CLIENT_SECRET/FIKUA_DSS_CREDENTIAL_PASSWORD
+        # (the DSS tenant's actual credentials, hence secrets) — mirroring
+        # fikua-lab-issuer's own DSS wiring. Without these,
+        # cmd/idp/main.go's loadVerifier finds FIKUA_DSS_URL empty and
+        # silently disables /oid4vp/v1/* (see that function's doc comment)
+        # rather than failing the deploy — a working deploy with a
+        # 404'ing Verifier looks identical to this step being skipped, so
+        # don't skip it.
+        # The same merge-rather-than-replace shape as fikua-lab-issuer's
+        # deploy.yml so any other line already in .env (e.g. one
+        # hand-added for incident recovery) survives a re-run untouched.
         env:
           FIKUA_BASE_URL: ${{ vars.FIKUA_BASE_URL }}
           FIKUA_CREDENTIAL_ISSUER_URL: ${{ vars.FIKUA_CREDENTIAL_ISSUER_URL }}
           FIKUA_ATTESTATION_REGISTRY_URL: ${{ vars.FIKUA_ATTESTATION_REGISTRY_URL }}
           FIKUA_ISSUABLE_SCHEMES: ${{ vars.FIKUA_ISSUABLE_SCHEMES }}
+          FIKUA_DSS_URL: ${{ vars.FIKUA_DSS_URL }}
+          FIKUA_DSS_CLIENT_ID: ${{ vars.FIKUA_DSS_CLIENT_ID }}
+          FIKUA_DSS_VERIFIER_CREDENTIAL_ID: ${{ vars.FIKUA_DSS_VERIFIER_CREDENTIAL_ID }}
+          FIKUA_DSS_CLIENT_SECRET: ${{ secrets.FIKUA_DSS_CLIENT_SECRET }}
+          FIKUA_DSS_CREDENTIAL_PASSWORD: ${{ secrets.FIKUA_DSS_CREDENTIAL_PASSWORD }}
         run: |
           set -e
           ssh vps.fikua.com 'sudo mkdir -p /opt/vps/projects/fikua-lab-idp'
@@ -97,13 +107,18 @@ jobs:
           set -e
           ENV_FILE=/opt/vps/projects/fikua-lab-idp/.env
           touch "\$ENV_FILE"
-          grep -v -E '^(FIKUA_BASE_URL=|FIKUA_CREDENTIAL_ISSUER_URL=|FIKUA_ATTESTATION_REGISTRY_URL=|FIKUA_ISSUABLE_SCHEMES=)' "\$ENV_FILE" > "\$ENV_FILE.tmp" || true
+          grep -v -E '^(FIKUA_BASE_URL=|FIKUA_CREDENTIAL_ISSUER_URL=|FIKUA_ATTESTATION_REGISTRY_URL=|FIKUA_ISSUABLE_SCHEMES=|FIKUA_DSS_URL=|FIKUA_DSS_CLIENT_ID=|FIKUA_DSS_VERIFIER_CREDENTIAL_ID=|FIKUA_DSS_CLIENT_SECRET=|FIKUA_DSS_CREDENTIAL_PASSWORD=)' "\$ENV_FILE" > "\$ENV_FILE.tmp" || true
           {
             cat "\$ENV_FILE.tmp"
             echo "FIKUA_BASE_URL=$FIKUA_BASE_URL"
             echo "FIKUA_CREDENTIAL_ISSUER_URL=$FIKUA_CREDENTIAL_ISSUER_URL"
             echo "FIKUA_ATTESTATION_REGISTRY_URL=$FIKUA_ATTESTATION_REGISTRY_URL"
             echo "FIKUA_ISSUABLE_SCHEMES=$FIKUA_ISSUABLE_SCHEMES"
+            echo "FIKUA_DSS_URL=$FIKUA_DSS_URL"
+            echo "FIKUA_DSS_CLIENT_ID=$FIKUA_DSS_CLIENT_ID"
+            echo "FIKUA_DSS_VERIFIER_CREDENTIAL_ID=$FIKUA_DSS_VERIFIER_CREDENTIAL_ID"
+            echo "FIKUA_DSS_CLIENT_SECRET=$FIKUA_DSS_CLIENT_SECRET"
+            echo "FIKUA_DSS_CREDENTIAL_PASSWORD=$FIKUA_DSS_CREDENTIAL_PASSWORD"
           } > "\$ENV_FILE"
           rm -f "\$ENV_FILE.tmp"
           chmod 600 "\$ENV_FILE"
