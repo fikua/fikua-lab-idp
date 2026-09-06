@@ -48,6 +48,20 @@ services:
       # FIKUA_ISSUABLE_SCHEMES, or the form collects claims the issuer
       # won't issue.
       FIKUA_ISSUABLE_SCHEMES: ${FIKUA_ISSUABLE_SCHEMES:-urn:eudi:pid:1,urn:fikua:padro:barcelona:1}
+      # OID4VP Verifier: Request Objects (JAR) are signed via the Fikua
+      # DSS, not a local key — see internal/crypto/requestsigningkey.go's
+      # doc comment for why (this key represents the Relying Party's
+      # identity to wallets, the role a future Wallet-Relying-Party
+      # Access Certificate will occupy, so it's routed through the same
+      # remote-signing seam fikua-lab-issuer's credential-signing key
+      # already uses). Empty FIKUA_DSS_URL disables /oid4vp/v1/* entirely
+      # (see cmd/idp/main.go's loadVerifier) rather than falling back to
+      # a local key — there is no degraded mode for this one.
+      FIKUA_DSS_URL: ${FIKUA_DSS_URL:-https://dss.fikua.com}
+      FIKUA_DSS_CLIENT_ID: ${FIKUA_DSS_CLIENT_ID:-fikua-verifier}
+      FIKUA_DSS_CLIENT_SECRET: ${FIKUA_DSS_CLIENT_SECRET:?FIKUA_DSS_CLIENT_SECRET must be set in .env}
+      FIKUA_DSS_VERIFIER_CREDENTIAL_ID: ${FIKUA_DSS_VERIFIER_CREDENTIAL_ID:-fikua-verifier-001}
+      FIKUA_DSS_CREDENTIAL_PASSWORD: ${FIKUA_DSS_CREDENTIAL_PASSWORD:?FIKUA_DSS_CREDENTIAL_PASSWORD must be set in .env}
       # Holds idp-key.pem (required, no ephemeral fallback — see
       # internal/crypto.LoadFromPEM's doc comment) and optionally
       # root-ca.crt for Wallet Provider trust pinning. This is a file on
