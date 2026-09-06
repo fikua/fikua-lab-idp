@@ -71,7 +71,9 @@ openssl ecparam -genkey -name prime256v1 -noout -out certs/idp-key.pem
 ## API
 
 Full OpenAPI 3.0 spec at [`docs/openapi.yaml`](docs/openapi.yaml), also
-served live at `/openapi.yaml` and browsable at `/docs` (Swagger UI).
+served live at `/openapi.yaml` and browsable at `/swagger` (Swagger
+UI) — same convention as `fikua-lab-issuer` and
+`fikua-lab-attestation-registry`.
 
 - `GET /.well-known/oauth-authorization-server` — RFC 8414 metadata.
 - `GET /oid4vci/v1/jwks` — the access-token signing key's public JWK Set.
