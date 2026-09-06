@@ -34,6 +34,13 @@ type Store struct {
 	authCodes      map[string]Data
 	pendingAuth    map[string]map[string]string
 	identifyReplay map[string]identifyReplayEntry
+	// identifiedSessions backs the reused-request_uri flow required by
+	// FAPI 2.0 Security Profile §5.3.2.2 Note 3 (see
+	// fapi2-security-profile-final-par-ensure-reused-request-uri-prior-to-auth-completion-succeeds):
+	// completing identification must not itself finish the OAuth2
+	// response, only mark the request_uri as identified so a *second*
+	// GET /authorize call is the one that actually mints the code.
+	identifiedSessions map[string]identifiedSessionEntry
 	// issuedJTIByCode maps an authorization code to the jti of the access
 	// token minted from it, kept past the code's own deletion so a later
 	// reuse of that code can find the token to revoke — the stateless-JWT
@@ -70,12 +77,13 @@ type identifyReplayEntry struct {
 // NewStore builds an empty Store.
 func NewStore() *Store {
 	return &Store{
-		parRequests:     make(map[string]parRequestEntry),
-		authCodes:       make(map[string]Data),
-		pendingAuth:     make(map[string]map[string]string),
-		identifyReplay:  make(map[string]identifyReplayEntry),
-		issuedJTIByCode: make(map[string]string),
-		revokedJTIs:     make(map[string]time.Time),
+		parRequests:        make(map[string]parRequestEntry),
+		authCodes:          make(map[string]Data),
+		pendingAuth:        make(map[string]map[string]string),
+		identifyReplay:     make(map[string]identifyReplayEntry),
+		identifiedSessions: make(map[string]identifiedSessionEntry),
+		issuedJTIByCode:    make(map[string]string),
+		revokedJTIs:        make(map[string]time.Time),
 	}
 }
 
@@ -107,6 +115,15 @@ func (s *Store) StoreParRequest(requestURI string, params map[string]string) {
 // stored), or if it has outlived parRequestTTL — an expired entry is
 // deleted (not left to linger) but treated as if it never existed, same
 // as an unknown one (RFC 9126 §2.2's single-use, short-lived request_uri).
+//
+// Only the branch of HandleAuthorize that actually completes the OAuth2
+// response (a valid, request_uri-bound identified session already
+// present — see identifiedSessions) may call this. Reaching /authorize
+// and being shown the identification form must not itself count as
+// "using" request_uri, or the fapi2-security-profile-final-par-ensure-
+// reused-request-uri-prior-to-auth-completion-succeeds conformance test's
+// legitimate second visit would find it already gone — see PeekParRequest
+// for the non-destructive lookup every other caller wants.
 func (s *Store) ConsumeParRequest(requestURI string) (params map[string]string, ok bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -120,6 +137,26 @@ func (s *Store) ConsumeParRequest(requestURI string) (params map[string]string, 
 	}
 	params, ok = entry.Params, true
 	return params, ok
+}
+
+// PeekParRequest is ConsumeParRequest's non-destructive counterpart: it
+// leaves the entry in place so a legitimate later visit (first-time
+// identification, or a client_id/expiry check that fails and must still
+// allow a retry) doesn't burn the request_uri's one use. Expiry is still
+// enforced and still deletes the expired entry (nothing to preserve by
+// leaving a dead entry around), it just doesn't delete a live one.
+func (s *Store) PeekParRequest(requestURI string) (params map[string]string, ok bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	entry, found := s.parRequests[requestURI]
+	if !found {
+		return nil, false
+	}
+	if time.Since(entry.CreatedAt) > parRequestTTL {
+		delete(s.parRequests, requestURI)
+		return nil, false
+	}
+	return entry.Params, true
 }
 
 // authCodeTTL is how long an authorization code stays redeemable after
@@ -254,6 +291,66 @@ func (s *Store) ConsumePendingAuth(token string) (params map[string]string, ok b
 		delete(s.pendingAuth, token)
 	}
 	return params, ok
+}
+
+// identifiedSessionTTL bounds how long a completed identification stays
+// good for the follow-up /authorize visit that actually completes the
+// OAuth2 response. Matches parRequestTTL: there is no reason for this
+// leg of the flow to outlive the request_uri it's bound to.
+const identifiedSessionTTL = parRequestTTL
+
+// identifiedSessionEntry is a completed identification, bound to the one
+// request_uri it was identified for — see CheckIdentified for why the
+// binding is checked exactly, not just presence. RecordID is the
+// issuance record CompleteIdentification created, carried here because
+// the second /authorize visit that finishes the OAuth2 response has no
+// issuer_state of its own to resolve it from (that PAR param is only
+// ever present on the separate Credential-Issuer-initiated fast path).
+type identifiedSessionEntry struct {
+	RequestURI string
+	RecordID   string
+	CreatedAt  time.Time
+}
+
+// MarkIdentified records that requestURI's identification succeeded
+// against recordID and returns a fresh opaque cookie value naming that
+// fact, valid for identifiedSessionTTL. Called by CompleteIdentification
+// instead of minting the authorization code directly — the code is only
+// minted when this cookie later comes back to /authorize bound to the
+// same request_uri (see CheckIdentified), which is what makes that
+// second /authorize call, and not the /identify/complete POST, the one
+// the FAPI conformance test observes completing the authorization.
+func (s *Store) MarkIdentified(requestURI, recordID string) (cookieValue string) {
+	cookieValue = RandomToken(24)
+	s.mu.Lock()
+	s.identifiedSessions[cookieValue] = identifiedSessionEntry{RequestURI: requestURI, RecordID: recordID, CreatedAt: time.Now()}
+	s.mu.Unlock()
+	return cookieValue
+}
+
+// CheckIdentified reports whether cookieValue names a live, unexpired
+// identification for exactly requestURI, returning the issuance record it
+// was identified against. The exact request_uri match is the anti-leakage
+// property this whole mechanic depends on: two conformance tests (or two
+// wallets) running their identification flows around the same time must
+// never have test/wallet A's completed session satisfy test/wallet B's
+// /authorize call for a different request_uri, even though both sessions
+// are simultaneously live in this same map. Lazy expiry on read, matching
+// this store's no-background-sweeper style (see identifyReplayTTL's
+// GetIdentifyReplay for the same pattern) — the entry is left in place
+// either way since nothing but memory is at stake and a caller will not
+// retry across process restarts.
+func (s *Store) CheckIdentified(cookieValue, requestURI string) (recordID string, ok bool) {
+	if cookieValue == "" {
+		return "", false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	entry, found := s.identifiedSessions[cookieValue]
+	if !found || time.Since(entry.CreatedAt) > identifiedSessionTTL || entry.RequestURI != requestURI {
+		return "", false
+	}
+	return entry.RecordID, true
 }
 
 // identifyReplayTTL bounds how long a completed /identify/complete

@@ -3,6 +3,7 @@ package httpapi
 import (
 	"encoding/json"
 	"net/http"
+	"strings"
 
 	"github.com/fikua/fikua-lab-idp/internal/authz"
 	"github.com/fikua/fikua-lab-idp/internal/oauth2"
@@ -30,7 +31,11 @@ func (h *Handler) par(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) authorize(w http.ResponseWriter, r *http.Request) {
-	result, err := h.authz.HandleAuthorize(r.Context(), r.URL.Query().Get("request_uri"), r.URL.Query().Get("client_id"))
+	var identifiedCookie string
+	if c, err := r.Cookie(authz.IdentifiedCookieName); err == nil {
+		identifiedCookie = c.Value
+	}
+	result, err := h.authz.HandleAuthorize(r.Context(), r.URL.Query().Get("request_uri"), r.URL.Query().Get("client_id"), identifiedCookie)
 	if err != nil {
 		writeAuthorizeError(w, err)
 		return
@@ -116,23 +121,73 @@ type identifyCompleteRequest struct {
 	SourceRef      string         `json:"source_ref"`
 }
 
-// identifyComplete implements POST /identify/complete: turns a
-// completed identification form into the OAuth2 authorization response
-// the deferred /authorize would have produced, and hands the frontend a
-// redirect URL to follow (it does not itself redirect — the frontend's
-// own JS drives window.location.href, per app.js).
+// identifyComplete implements POST /identify/complete: marks the
+// deferred authorization's request_uri as identified (setting a cookie
+// naming that session) and hands the frontend a redirect URL to follow —
+// back to /authorize?request_uri=<original>, not the client's own
+// redirect_uri (see authz.CompleteIdentification's doc comment for why:
+// FAPI 2.0 Security Profile §5.3.2.2 Note 3 requires a *second*
+// /authorize visit be the one that completes the OAuth2 response). It
+// does not itself redirect — the frontend's own JS drives
+// window.location.href, per app.js — but the Set-Cookie on this response
+// rides along with the browser to that follow-up GET regardless.
 func (h *Handler) identifyComplete(w http.ResponseWriter, r *http.Request) {
 	var req identifyCompleteRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeOAuthError(w, oauth2.BadRequest(oauth2.InvalidRequest, "Invalid request body: "+err.Error()))
 		return
 	}
-	redirect, err := h.authz.CompleteIdentification(r.Context(), req.Session, req.CredentialData, req.SourceType, req.SourceRef)
+	redirect, cookieValue, err := h.authz.CompleteIdentification(r.Context(), req.Session, req.CredentialData, req.SourceType, req.SourceRef)
 	if err != nil {
 		writeOAuthError(w, err)
 		return
 	}
+	if cookieValue != "" {
+		h.setIdentifiedCookie(w, cookieValue)
+	}
 	writeJSON(w, http.StatusOK, map[string]string{"redirect": redirect})
+}
+
+// setIdentifiedCookie sets the opaque session cookie CompleteIdentification
+// mints, read back by HandleAuthorize's second /authorize visit.
+//
+//   - HttpOnly: this cookie is never read by the identification page's own
+//     JS (app.js drives navigation via the JSON "redirect" field, never
+//     document.cookie) — no reason to expose it to script, every reason
+//     not to (XSS exfiltration).
+//   - Secure based on h.baseURL's scheme rather than the inbound request's
+//     own r.TLS: this AS typically sits behind a TLS-terminating reverse
+//     proxy (see the README's Traefik/nginx mentions for the sibling
+//     X.509 flow), so the connection reaching this process is often plain
+//     HTTP even in production and r.TLS would wrongly read as insecure.
+//     h.baseURL is this service's own externally-visible identifier
+//     (FIKUA_BASE_URL, "https://idp.fikua.com" by default) and is already
+//     authoritative elsewhere in this codebase (e.g. the `iss` claim) —
+//     using it here means local `make run` (baseURL defaults aside, a
+//     dev override would use an http:// baseURL) still gets a cookie the
+//     browser will actually store.
+//   - SameSite=Lax: the browser navigation this cookie must survive is the
+//     frontend's own window.location.href to /authorize — a same-site,
+//     top-level GET, which Lax always sends; Strict would too, but Lax is
+//     the least restrictive setting that still blocks the cookie from
+//     being attached to a cross-site request, which is all this needs.
+//   - Path=/oid4vci/v1/authorize: scoped to the one endpoint that ever
+//     reads it, so it never rides along on unrelated same-origin requests.
+//   - MaxAge matches session.identifiedSessionTTL (60s) so the cookie
+//     itself expires no later than the server-side session it names —
+//     letting it outlive the session would just mean CheckIdentified
+//     rejects it anyway, but there is no reason to ask the browser to hold
+//     a cookie the server already considers dead.
+func (h *Handler) setIdentifiedCookie(w http.ResponseWriter, value string) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     authz.IdentifiedCookieName,
+		Value:    value,
+		Path:     "/oid4vci/v1/authorize",
+		MaxAge:   60,
+		HttpOnly: true,
+		Secure:   strings.HasPrefix(h.baseURL, "https://"),
+		SameSite: http.SameSiteLaxMode,
+	})
 }
 
 // identifyRejectRequest is POST /identify/reject's body.

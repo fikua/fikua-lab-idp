@@ -26,6 +26,22 @@ import (
 // authorization code's session metadata — see HandlePar's doc comment.
 const boundClientIDKey = "_bound_client_id"
 
+// pendingRequestURIKey is the internal (non-spec) key HandleAuthorize
+// stashes the original request_uri under when it defers to
+// identification. CompleteIdentification needs it to know which
+// request_uri to mark identified (session.Store.MarkIdentified) and
+// which /authorize call to redirect back to — the PAR params themselves
+// never carry request_uri (HandlePar rejects it per RFC 9126 §2.1).
+const pendingRequestURIKey = "_pending_request_uri"
+
+// IdentifiedCookieName is the opaque cookie CompleteIdentification sets
+// and HandleAuthorize's second visit reads back, naming a completed
+// identification bound to one request_uri — see session.Store's
+// MarkIdentified/CheckIdentified for the actual state. Exported so the
+// httpapi layer (which alone touches http.Cookie) uses the exact same
+// name on both ends without duplicating the literal.
+const IdentifiedCookieName = "fikua_idp_identified"
+
 // PIDConfigID is the credential_configuration_id the identification form
 // collects claims for. This ecosystem only issues PID today — kept as a
 // constant in one place so a future scope-to-config mapping has somewhere
@@ -184,10 +200,19 @@ type AuthorizeResult struct {
 //
 // When no issuer_state resolves an existing issuance record, the request
 // is deferred to the end-user identification flow (see
-// ResolveIdentifyScope/CompleteIdentification): a pending-authorization
-// token is minted and returned as AuthorizeResult.IdentifyRedirect, and
-// the httpapi layer 302s the browser to this service's own identification
-// UI instead of completing the OAuth2 response here.
+// ResolveIdentifyScope/CompleteIdentification) — but per FAPI 2.0
+// Security Profile §5.3.2.2 Note 3
+// (fapi2-security-profile-final-par-ensure-reused-request-uri-prior-to-auth-completion-succeeds),
+// a *first* visit that lands here must only show the identification page
+// — it must not complete the authorization. Only a *second* /authorize
+// visit, made after identification has succeeded, is allowed to mint the
+// code. That second visit is recognized by identifiedCookie: an opaque
+// cookie value (session.Store.MarkIdentified/CheckIdentified) that
+// CompleteIdentification sets and redirects the browser straight back to
+// this same /authorize call with. So request_uri is only PEEKed (not
+// consumed) here on a first visit — burning its one RFC 9126 §2.2 use
+// happens only once identification is confirmed, on the success path
+// below.
 //
 // A spec-conformant wallet/test client has no reason to know about
 // issuer_state as an out-of-band mechanism at all: it may reuse a
@@ -201,12 +226,16 @@ type AuthorizeResult struct {
 // minted requestURI). PAR §2.2 requires a request_uri be bound to the
 // client that pushed it — RFC 9126's PAR-3-3 conformance check catches
 // exactly this: presenting client A's request_uri while claiming to be
-// client B.
-func (s *Service) HandleAuthorize(ctx context.Context, requestURI, queryClientID string) (AuthorizeResult, error) {
+// client B. Checked on every visit, first or second, same as before.
+func (s *Service) HandleAuthorize(ctx context.Context, requestURI, queryClientID, identifiedCookie string) (AuthorizeResult, error) {
 	if requestURI == "" {
 		return AuthorizeResult{}, oauth2.BadRequest(oauth2.InvalidRequest, "Missing request_uri")
 	}
-	params, ok := s.sessions.ConsumeParRequest(requestURI)
+	// Non-destructive: a first visit (the common case) must leave
+	// request_uri exactly as usable as it was, since this visit does not
+	// complete the authorization. Only the identified branch below
+	// re-fetches destructively via ConsumeParRequest.
+	params, ok := s.sessions.PeekParRequest(requestURI)
 	if !ok {
 		return AuthorizeResult{}, oauth2.BadRequest(oauth2.InvalidRequest, "Invalid or expired request_uri")
 	}
@@ -224,16 +253,55 @@ func (s *Service) HandleAuthorize(ctx context.Context, requestURI, queryClientID
 			recordID = rec.ID
 		}
 	}
-	if recordID == "" {
-		token := s.sessions.StorePendingAuth(params)
-		return AuthorizeResult{IdentifyRedirect: s.baseURL + "/identify/?session=" + token}, nil
+	if recordID != "" {
+		// issuer_state already resolved an existing issuance record: this
+		// is the pre-existing, separate fast path (a Credential Issuer
+		// -initiated offer) that never went through end-user
+		// identification in the first place, so there is no "first visit
+		// vs second visit" distinction to make — it always completes
+		// immediately, exactly as before this change.
+		params, ok = s.sessions.ConsumeParRequest(requestURI)
+		if !ok {
+			return AuthorizeResult{}, oauth2.BadRequest(oauth2.InvalidRequest, "Invalid or expired request_uri")
+		}
+		code := s.sessions.CreateAuthCode(session.Data{
+			SessionID: session.RandomToken(16),
+			Metadata:  authCodeMetadata(recordID, params),
+		})
+		return AuthorizeResult{Code: code, RedirectURI: params["redirect_uri"], State: params["state"]}, nil
 	}
 
-	code := s.sessions.CreateAuthCode(session.Data{
-		SessionID: session.RandomToken(16),
-		Metadata:  authCodeMetadata(recordID, params),
-	})
-	return AuthorizeResult{Code: code, RedirectURI: params["redirect_uri"], State: params["state"]}, nil
+	// No issuance record: this is the identification-gated branch the
+	// FAPI test targets. A valid session cookie bound to this exact
+	// request_uri (CheckIdentified enforces the binding — never accept a
+	// cookie minted for a different request_uri, see
+	// session.Store.CheckIdentified's doc comment for why) means
+	// identification already happened and this is the legitimate second
+	// visit: consume request_uri for real now and complete the response.
+	if identifiedRecordID, identified := s.sessions.CheckIdentified(identifiedCookie, requestURI); identified {
+		params, ok = s.sessions.ConsumeParRequest(requestURI)
+		if !ok {
+			return AuthorizeResult{}, oauth2.BadRequest(oauth2.InvalidRequest, "Invalid or expired request_uri")
+		}
+		code := s.sessions.CreateAuthCode(session.Data{
+			SessionID: session.RandomToken(16),
+			Metadata:  authCodeMetadata(identifiedRecordID, params),
+		})
+		return AuthorizeResult{Code: code, RedirectURI: params["redirect_uri"], State: params["state"]}, nil
+	}
+
+	// First visit (or a visit with no/wrong/expired session): defer to
+	// identification without touching request_uri. pendingRequestURIKey
+	// rides along on the same params map so CompleteIdentification knows
+	// which request_uri to mark identified and which /authorize call to
+	// send the browser back to.
+	pending := make(map[string]string, len(params)+1)
+	for k, v := range params {
+		pending[k] = v
+	}
+	pending[pendingRequestURIKey] = requestURI
+	token := s.sessions.StorePendingAuth(pending)
+	return AuthorizeResult{IdentifyRedirect: s.baseURL + "/identify/?session=" + token}, nil
 }
 
 // authCodeMetadata carries everything HandleAuthCodeToken must re-check
@@ -265,24 +333,41 @@ func (s *Service) ResolveIdentifyScope(sessionToken string) (credentialConfigID 
 	return PIDConfigID, nil
 }
 
-// CompleteIdentification implements POST /identify/complete: it turns a
-// completed identification form into the same OAuth2 authorization
-// response HandleAuthorize's normal path produces, resuming the flow
-// that was deferred to the identification UI.
+// CompleteIdentification implements POST /identify/complete. It no
+// longer completes the OAuth2 authorization response itself — per FAPI
+// 2.0 Security Profile §5.3.2.2 Note 3
+// (fapi2-security-profile-final-par-ensure-reused-request-uri-prior-to-auth-completion-succeeds),
+// authentication must not be considered done until a *second* visit to
+// /authorize observes it. So this only creates the issuance record and
+// then marks the original request_uri's session as identified
+// (session.Store.MarkIdentified), returning cookieValue for the httpapi
+// layer to set on the response and a redirect straight back to
+// /authorize?request_uri=<original> — whose second invocation (now
+// finding a valid, matching session) is what actually mints the code and
+// redirects to the client's own redirect_uri.
 //
 // Replay-safe for identifyReplayTTL: a retried POST for the same
 // session (double form submit, flaky network) gets back the exact same
 // redirect instead of "invalid or expired session", since the
 // pending-authorization token itself is consumed destructively
-// (single-use) on the first successful call.
-func (s *Service) CompleteIdentification(ctx context.Context, sessionToken string, credentialData map[string]any, sourceType, sourceRef string) (redirect string, err error) {
+// (single-use) on the first successful call. On a replay, cookieValue is
+// returned empty — the browser's original Set-Cookie already landed, and
+// minting a second live cookie for the same request_uri is unnecessary.
+func (s *Service) CompleteIdentification(ctx context.Context, sessionToken string, credentialData map[string]any, sourceType, sourceRef string) (redirect string, cookieValue string, err error) {
 	if cached, ok := s.sessions.GetIdentifyReplay(sessionToken); ok {
-		return cached, nil
+		return cached, "", nil
 	}
 
 	params, ok := s.sessions.ConsumePendingAuth(sessionToken)
 	if !ok {
-		return "", oauth2.BadRequest(oauth2.InvalidRequest, "Invalid or expired identification session")
+		return "", "", oauth2.BadRequest(oauth2.InvalidRequest, "Invalid or expired identification session")
+	}
+	requestURI := params[pendingRequestURIKey]
+	if requestURI == "" {
+		// Can only happen if HandleAuthorize's identify-redirect branch
+		// changes without this field staying in sync — fail loudly rather
+		// than silently completing with no second-visit gate at all.
+		return "", "", oauth2.BadRequest(oauth2.InvalidRequest, "Identification session is missing its request_uri")
 	}
 
 	rec, err := s.issuer.Create(ctx, issuerclient.CreateRequest{
@@ -292,22 +377,19 @@ func (s *Service) CompleteIdentification(ctx context.Context, sessionToken strin
 		SourceRef:      sourceRef,
 	})
 	if err != nil {
-		return "", oauth2.ServiceUnavailable(oauth2.InvalidRequest, "Credential Issuer unreachable: "+err.Error())
+		return "", "", oauth2.ServiceUnavailable(oauth2.InvalidRequest, "Credential Issuer unreachable: "+err.Error())
 	}
 
-	code := s.sessions.CreateAuthCode(session.Data{
-		SessionID: session.RandomToken(16),
-		Metadata:  authCodeMetadata(rec.ID, params),
-	})
-
-	result := AuthorizeResult{Code: code, RedirectURI: params["redirect_uri"], State: params["state"]}
-	redirect, err = BuildAuthorizationRedirect(result, s.baseURL)
-	if err != nil {
-		return "", oauth2.BadRequest(oauth2.InvalidRequest, "Invalid redirect_uri: "+err.Error())
-	}
+	// rec.ID travels to the second /authorize visit via the identified
+	// session entry itself (session.Store.CheckIdentified returns it) —
+	// that visit has no issuer_state PAR param of its own to resolve an
+	// issuance record from, since this whole branch only exists for
+	// requests that never had one.
+	cookieValue = s.sessions.MarkIdentified(requestURI, rec.ID)
+	redirect = s.baseURL + "/oid4vci/v1/authorize?request_uri=" + url.QueryEscape(requestURI)
 
 	s.sessions.StoreIdentifyReplay(sessionToken, redirect)
-	return redirect, nil
+	return redirect, cookieValue, nil
 }
 
 // RejectIdentification implements the user-cancels-authentication path:
