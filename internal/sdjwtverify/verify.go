@@ -84,23 +84,56 @@ func VerifyWithStatus(presentation, expectedAud, expectedNonce string) (claims m
 		return nil, nil, err
 	}
 
+	// Read first, verify after: HAIP §7 point 2.2.2.2 requires the
+	// Verifier fetch and check the referenced Token Status List
+	// regardless of whether the presentation is ultimately accepted —
+	// confirmed against OIDF conformance runs for the invalid-signature,
+	// invalid-KB-JWT-signature and invalid-sd_hash tests, all of which
+	// still require EnsureVerifierFetchedStatusList to pass even though
+	// the presentation itself is rejected. Reading status off the
+	// unverified payload is safe: it only ever gates a second, unrelated
+	// network fetch (see statuslistcheck.ParseRef's caller), never trust
+	// decisions about the claims themselves — those still wait for the
+	// signature check below.
+	status = unverifiedStatusClaim(parsed.issuerJWT)
+
 	issuerClaims, err := verifyIssuerSignature(parsed.issuerJWT)
 	if err != nil {
-		return nil, nil, err
+		return nil, status, err
 	}
 	if err := verifyDisclosureDigests(parsed.disclosures, issuerClaims); err != nil {
-		return nil, nil, err
+		return nil, status, err
 	}
 	if err := verifyKeyBinding(parsed, issuerClaims, presentation, expectedAud, expectedNonce); err != nil {
-		return nil, nil, err
+		return nil, status, err
 	}
 
 	claims = make(map[string]any, len(parsed.disclosures))
 	for _, d := range parsed.disclosures {
 		claims[d.claimName] = d.claimValue
 	}
+	// Now backed by a signature-verified payload — no change in value
+	// from the unverified read above unless the issuer JWT's signature
+	// check just failed to catch a tampered status claim, which the
+	// caller relies on not happening.
 	status, _ = issuerClaims["status"].(map[string]any)
 	return claims, status, nil
+}
+
+// unverifiedStatusClaim reads the "status" claim straight off an issuer
+// JWT's payload without checking its signature — see VerifyWithStatus's
+// call site for why that is safe here.
+func unverifiedStatusClaim(issuerJWT string) map[string]any {
+	msg, err := jws.Parse([]byte(issuerJWT))
+	if err != nil {
+		return nil
+	}
+	var claims map[string]any
+	if err := json.Unmarshal(msg.Payload(), &claims); err != nil {
+		return nil
+	}
+	status, _ := claims["status"].(map[string]any)
+	return status
 }
 
 // presentationParts is a parsed SD-JWT compact serialization:

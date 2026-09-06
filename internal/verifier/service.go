@@ -332,14 +332,21 @@ func (s *Service) verifyPresentation(ctx context.Context, v session.Verification
 		return mdocverify.Verify(vpToken, sessionDocType(v), v.ClientID, v.Nonce, thumbprint, v.ResponseURI, nil)
 	}
 
-	claims, status, err := sdjwtverify.VerifyWithStatus(vpToken, v.ClientID, v.Nonce)
-	if err != nil {
-		return nil, err
-	}
+	claims, status, verifyErr := sdjwtverify.VerifyWithStatus(vpToken, v.ClientID, v.Nonce)
+	// The status list fetch runs even when verifyErr is set: HAIP §7 point
+	// 2.2.2.2 requires the Verifier check revocation status regardless of
+	// whether the presentation is otherwise accepted (confirmed against
+	// OIDF's invalid-signature/-KB-JWT-signature/-sd_hash conformance
+	// tests, which all still require the fetch). status itself is read
+	// off the issuer JWT's payload without waiting on its signature — see
+	// sdjwtverify.unverifiedStatusClaim's doc comment on why that's safe.
 	if ref, ok := statuslistcheck.ParseRef(status); ok {
-		if err := statuslistcheck.CheckValid(ctx, ref); err != nil {
-			return nil, err
+		if err := statuslistcheck.CheckValid(ctx, ref); err != nil && verifyErr == nil {
+			verifyErr = err
 		}
+	}
+	if verifyErr != nil {
+		return nil, verifyErr
 	}
 	return claims, nil
 }
