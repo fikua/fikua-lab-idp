@@ -1,0 +1,544 @@
+openapi: 3.0.3
+info:
+  title: Fikua Identity Provider
+  version: "1.0.0"
+  description: |
+    OAuth2 authorization server for the Fikua Lab EUDI Wallet ecosystem —
+    HAIP-only (authorization_code via PAR, DPoP, ATCA client attestation,
+    PKCE S256 all mandatory) — plus the end-user identification UI that
+    flow redirects to, and (when a Fikua DSS signing credential is
+    configured) an OID4VP Verifier.
+
+    This service issues the OAuth2 access token that a separate
+    Credential Issuer (`fikua-lab-issuer`) trusts to complete OID4VCI
+    issuance; it does not itself expose any `/credential` endpoint.
+  license:
+    name: Apache-2.0
+    url: https://github.com/fikua/fikua-lab-idp/blob/main/LICENSE
+externalDocs:
+  description: README
+  url: https://github.com/fikua/fikua-lab-idp/blob/main/README.md
+servers:
+  - url: https://idp.fikua.com
+    description: Production
+
+tags:
+  - name: metadata
+    description: Discovery and health.
+  - name: oauth2
+    description: HAIP authorization_code flow (PAR, authorize, token, revocation).
+  - name: identify
+    description: End-user identification UI backend. Same-origin, not wallet-facing.
+  - name: oid4vp-verifier
+    description: >-
+      OID4VP Verifier endpoints. Only served when this deployment has a
+      Fikua DSS signing credential configured (`FIKUA_DSS_URL`) — absent
+      that, these paths 404.
+
+paths:
+  /health:
+    get:
+      tags: [metadata]
+      summary: Liveness check
+      operationId: health
+      responses:
+        "200":
+          description: Service is up.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, example: ok }
+
+  /.well-known/oauth-authorization-server:
+    get:
+      tags: [metadata]
+      summary: RFC 8414 authorization server metadata
+      operationId: authServerMetadata
+      responses:
+        "200":
+          description: This AS's metadata document (HAIP profile only).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AuthServerMetadata" }
+
+  /oid4vci/v1/jwks:
+    get:
+      tags: [oauth2]
+      summary: Access-token signing key (public JWK Set)
+      description: >-
+        Polled by the Credential Issuer to verify access tokens offline.
+        `Cache-Control: max-age=600` — the key only changes on deliberate
+        rotation.
+      operationId: jwks
+      responses:
+        "200":
+          description: JWK Set containing the current signing key.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/JWKSet" }
+
+  /oid4vci/v1/par:
+    post:
+      tags: [oauth2]
+      summary: Pushed Authorization Request (RFC 9126)
+      description: >-
+        Requires client attestation (ATCA draft-07) and PKCE S256; only
+        `response_type=code` is supported. Accepts an optional DPoP-PAR
+        binding via `dpop_jkt` or a `DPoP` proof header.
+      operationId: par
+      parameters:
+        - $ref: "#/components/parameters/ClientAttestation"
+        - $ref: "#/components/parameters/ClientAttestationPoP"
+        - $ref: "#/components/parameters/DPoP"
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema: { $ref: "#/components/schemas/PushedAuthorizationRequest" }
+      responses:
+        "201":
+          description: Request accepted; request_uri valid for 60s.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PushedAuthorizationResponse" }
+        "400":
+          $ref: "#/components/responses/OAuthError"
+
+  /oid4vci/v1/authorize:
+    get:
+      tags: [oauth2]
+      summary: Resolve a PAR request_uri into an authorization code
+      description: >-
+        Browser-facing, not JSON: on first visit (no prior identification)
+        redirects to the identification UI at `/identify/?session=...`;
+        on a subsequent visit with the `fikua_idp_identified` cookie set,
+        redirects to the client's own `redirect_uri` carrying `code`,
+        `state`, and `iss` (FAPI 2.0 §5.3.2.2 Note 3). Errors render an
+        HTML page, not JSON.
+      operationId: authorize
+      parameters:
+        - name: request_uri
+          in: query
+          required: true
+          schema: { type: string }
+        - name: client_id
+          in: query
+          required: true
+          schema: { type: string }
+      responses:
+        "302":
+          description: >-
+            Redirect to the identification UI, or back to the client's
+            redirect_uri with an authorization code.
+        "400":
+          description: An HTML error page (not JSON).
+          content:
+            text/html:
+              schema: { type: string }
+
+  /oid4vci/v1/token:
+    post:
+      tags: [oauth2]
+      summary: Token endpoint (authorization_code grant only)
+      description: >-
+        Validates PKCE `code_verifier`, DPoP proof-of-possession, and
+        client attestation against the client the code was bound to at
+        PAR time. Mints a DPoP-bound RFC 9068 `at+jwt` access token.
+      operationId: token
+      parameters:
+        - $ref: "#/components/parameters/ClientAttestation"
+        - $ref: "#/components/parameters/ClientAttestationPoP"
+        - name: DPoP
+          in: header
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema: { $ref: "#/components/schemas/TokenRequest" }
+      responses:
+        "200":
+          description: DPoP-bound access token.
+          headers:
+            Cache-Control:
+              schema: { type: string, example: no-store }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TokenResponse" }
+        "400":
+          $ref: "#/components/responses/OAuthError"
+
+  /oid4vci/v1/revoked-tokens:
+    get:
+      tags: [oauth2]
+      summary: Revoked access-token jti denylist
+      description: >-
+        Access tokens are stateless JWTs, so RFC 6749 §4.1.2's
+        "revoke the tokens issued from a reused authorization code" is
+        honoured by publishing revoked `jti`s here. Polled by the
+        Credential Issuer before honouring a token.
+      operationId: revokedTokens
+      responses:
+        "200":
+          description: Currently-revoked jti list.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  revoked_jti:
+                    type: array
+                    items: { type: string }
+
+  /identify/claims:
+    get:
+      tags: [identify]
+      summary: Claim metadata for a pending identification session
+      operationId: identifyClaims
+      parameters:
+        - name: session
+          in: query
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: The target credential configuration and its claim metadata.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  credential_configuration_id: { type: string }
+                  claims: { type: object }
+
+  /identify/complete:
+    post:
+      tags: [identify]
+      summary: Complete an identification session
+      description: >-
+        Sets the `fikua_idp_identified` cookie
+        (`Path=/oid4vci/v1/authorize`, `HttpOnly`, `SameSite=Lax`,
+        `MaxAge=60`) and returns a redirect back to `/authorize` — not
+        the client's own redirect_uri (FAPI 2.0 §5.3.2.2 Note 3).
+      operationId: identifyComplete
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [session]
+              properties:
+                session: { type: string }
+                credential_data: { type: object }
+                source_type: { type: string }
+                source_ref: { type: string }
+      responses:
+        "200":
+          description: Redirect target for the frontend to navigate to.
+          headers:
+            Set-Cookie:
+              schema: { type: string }
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  redirect: { type: string }
+
+  /identify/reject:
+    post:
+      tags: [identify]
+      summary: Deny access for a pending identification session
+      description: >-
+        Returns a redirect carrying `error=access_denied`
+        (RFC 6749 §4.1.2.1) instead of an authorization code.
+      operationId: identifyReject
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [session]
+              properties:
+                session: { type: string }
+      responses:
+        "200":
+          description: Redirect target for the frontend to navigate to.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  redirect: { type: string }
+
+  /oid4vp/v1/session:
+    post:
+      tags: [oid4vp-verifier]
+      summary: Create a verification session
+      description: >-
+        Builds a fresh state/nonce, DCQL query and signed Request Object
+        for the verification frontend to render as a QR code. A
+        malformed or empty body falls back to the PID defaults rather
+        than erroring.
+      operationId: oid4vpCreateSession
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                credential_type:
+                  type: string
+                  default: eu.europa.ec.eudi.pid.1
+                claims:
+                  type: array
+                  items: { type: string }
+                  default: [given_name, family_name, birth_date]
+                format: { type: string }
+      responses:
+        "201":
+          description: Session created.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  session_id: { type: string }
+                  request_uri: { type: string }
+                  client_id:
+                    type: string
+                    description: x509_hash client_id (HAIP §5).
+                  state: { type: string }
+
+  /oid4vp/v1/request/{id}:
+    get:
+      tags: [oid4vp-verifier]
+      summary: Fetch the signed Authorization Request Object (JAR)
+      operationId: oid4vpRequestObjectGet
+      parameters:
+        - $ref: "#/components/parameters/SessionId"
+      responses:
+        "200":
+          description: Signed Request Object (RFC 9101), not JSON.
+          headers:
+            Cache-Control:
+              schema: { type: string, example: no-store }
+          content:
+            application/oauth-authz-req+jwt:
+              schema: { type: string }
+    post:
+      tags: [oid4vp-verifier]
+      summary: Fetch the signed Authorization Request Object (request_uri_method=post)
+      description: >-
+        Accepts `wallet_metadata`/`wallet_nonce` form parameters but
+        ignores them — this Verifier is HAIP-fixed and negotiates
+        nothing about the request per fetch.
+      operationId: oid4vpRequestObjectPost
+      parameters:
+        - $ref: "#/components/parameters/SessionId"
+      requestBody:
+        required: false
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              properties:
+                wallet_metadata: { type: string }
+                wallet_nonce: { type: string }
+      responses:
+        "200":
+          description: Signed Request Object (RFC 9101), not JSON.
+          content:
+            application/oauth-authz-req+jwt:
+              schema: { type: string }
+
+  /oid4vp/v1/response:
+    post:
+      tags: [oid4vp-verifier]
+      summary: Wallet's VP Token submission
+      description: >-
+        Verifies the presentation (SD-JWT VC or mdoc), including a
+        Token Status List revocation check (HAIP §7 point 2.2.2.2). A
+        rejected presentation is always a 400, never a 200 (OID4VP §8.2).
+        Exactly one of `{vp_token, state}` or `{response}` (JWE, for
+        direct_post.jwt) is populated depending on response mode.
+      operationId: oid4vpResponse
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              properties:
+                vp_token: { type: string }
+                state: { type: string }
+                response:
+                  type: string
+                  description: JWE, present instead of vp_token+state under direct_post.jwt.
+      responses:
+        "200":
+          description: Presentation accepted.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  redirect_uri: { type: string }
+        "400":
+          description: Presentation rejected.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/VerifierResult" }
+
+  /oid4vp/v1/result/{id}:
+    get:
+      tags: [oid4vp-verifier]
+      summary: Poll a verification session's outcome
+      description: >-
+        A live-but-unpresented session answers 200 with a "pending"
+        result rather than 404 — 404 is reserved for a session id that
+        genuinely does not exist.
+      operationId: oid4vpResult
+      parameters:
+        - $ref: "#/components/parameters/SessionId"
+      responses:
+        "200":
+          description: Current session result (possibly "pending").
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/VerifierResult" }
+
+components:
+  parameters:
+    SessionId:
+      name: id
+      in: path
+      required: true
+      schema: { type: string }
+    ClientAttestation:
+      name: OAuth-Client-Attestation
+      in: header
+      required: true
+      description: ATCA draft-07 client attestation JWT (WIA).
+      schema: { type: string }
+    ClientAttestationPoP:
+      name: OAuth-Client-Attestation-PoP
+      in: header
+      required: true
+      description: ATCA draft-07 client attestation proof-of-possession JWT.
+      schema: { type: string }
+    DPoP:
+      name: DPoP
+      in: header
+      required: false
+      description: RFC 9449 DPoP proof JWT.
+      schema: { type: string }
+
+  responses:
+    OAuthError:
+      description: RFC 6749-shaped OAuth2 error.
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              error: { type: string }
+              error_description: { type: string }
+
+  schemas:
+    AuthServerMetadata:
+      type: object
+      properties:
+        issuer: { type: string }
+        token_endpoint: { type: string }
+        authorization_endpoint: { type: string }
+        pushed_authorization_request_endpoint: { type: string }
+        jwks_uri: { type: string }
+        response_types_supported:
+          type: array
+          items: { type: string }
+        grant_types_supported:
+          type: array
+          items: { type: string }
+        code_challenge_methods_supported:
+          type: array
+          items: { type: string }
+        token_endpoint_auth_methods_supported:
+          type: array
+          items: { type: string }
+        dpop_signing_alg_values_supported:
+          type: array
+          items: { type: string }
+        client_attestation_signing_alg_values_supported:
+          type: array
+          items: { type: string }
+        client_attestation_pop_signing_alg_values_supported:
+          type: array
+          items: { type: string }
+        require_pushed_authorization_requests: { type: boolean }
+        token_endpoint_auth_signing_alg_values_supported:
+          type: array
+          items: { type: string }
+        authorization_response_iss_parameter_supported: { type: boolean }
+        subject_types_supported:
+          type: array
+          items: { type: string }
+
+    JWKSet:
+      type: object
+      properties:
+        keys:
+          type: array
+          items: { type: object }
+
+    PushedAuthorizationRequest:
+      type: object
+      required: [response_type, client_id, code_challenge, code_challenge_method]
+      properties:
+        response_type: { type: string, enum: [code] }
+        client_id: { type: string }
+        redirect_uri: { type: string }
+        scope: { type: string }
+        state: { type: string }
+        code_challenge: { type: string }
+        code_challenge_method: { type: string, enum: [S256] }
+        dpop_jkt: { type: string }
+        issuer_state: { type: string }
+
+    PushedAuthorizationResponse:
+      type: object
+      properties:
+        request_uri: { type: string }
+        expires_in: { type: integer, example: 60 }
+
+    TokenRequest:
+      type: object
+      required: [grant_type, code, code_verifier]
+      properties:
+        grant_type: { type: string, enum: [authorization_code] }
+        code: { type: string }
+        redirect_uri: { type: string }
+        code_verifier: { type: string }
+        client_id: { type: string }
+
+    TokenResponse:
+      type: object
+      properties:
+        access_token:
+          type: string
+          description: RFC 9068 at+jwt, DPoP-bound via cnf.jkt.
+        token_type: { type: string, enum: [DPoP] }
+        expires_in: { type: integer, example: 300 }
+
+    VerifierResult:
+      type: object
+      properties:
+        status: { type: string, enum: [pending, success, error] }
+        claims: { type: object }
+        error: { type: string }
+        error_description: { type: string }

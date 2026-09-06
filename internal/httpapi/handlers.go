@@ -53,6 +53,8 @@ func NewHandler(baseURL string, signingKey *fikuacrypto.SigningKey, authzService
 // Routes registers this handler's endpoints on mux.
 func (h *Handler) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /health", h.health)
+	mux.HandleFunc("GET /docs", h.docs)
+	mux.HandleFunc("GET /openapi.yaml", h.openapiSpec)
 	mux.HandleFunc("GET /.well-known/oauth-authorization-server", h.authServerMetadata)
 	mux.HandleFunc("GET /oid4vci/v1/jwks", h.jwks)
 	mux.HandleFunc("POST /oid4vci/v1/par", h.par)
