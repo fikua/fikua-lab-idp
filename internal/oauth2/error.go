@@ -46,6 +46,15 @@ func BadRequest(code, description string) *Exception {
 	return &Exception{HTTPStatus: 400, Err: Error{Code: code, Description: description}}
 }
 
+// NotFound builds a 404 Exception — for a session or resource that never
+// existed or has expired. Distinct from BadRequest because the OID4VP
+// Verifier's request and result endpoints are addressed by a path id, and a
+// wallet or a polling frontend needs "that id is gone" to read differently
+// from "your request was malformed".
+func NotFound(code, description string) *Exception {
+	return &Exception{HTTPStatus: 404, Err: Error{Code: code, Description: description}}
+}
+
 // Unauthorized builds a 401 Exception.
 func Unauthorized(code, description string) *Exception {
 	return &Exception{HTTPStatus: 401, Err: Error{Code: code, Description: description}}

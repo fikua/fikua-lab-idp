@@ -1,7 +1,8 @@
-// Package session holds this authorization server's ephemeral protocol
-// state: PAR requests, authorization codes, deferred (pending)
-// authorizations awaiting end-user identification, and the revoked-token
-// denylist. In-memory only. PAR requests and authorization codes carry a
+// Package session holds this service's ephemeral protocol state: the
+// authorization server's PAR requests, authorization codes, deferred
+// (pending) authorizations awaiting end-user identification and
+// revoked-token denylist, plus the OID4VP Verifier's verification sessions
+// (see VerificationSession). In-memory only. PAR requests and authorization codes carry a
 // short TTL (parRequestTTL, authCodeTTL — 60s each) on top of single-use
 // consumption, since a spec-conformant client may present either after
 // time has passed without ever using it once.
@@ -50,7 +51,97 @@ type Store struct {
 	// and polled by the Credential Issuer. Entries expire once the token
 	// they name could no longer have been valid anyway.
 	revokedJTIs map[string]time.Time
+	// verifications holds the OID4VP Verifier's sessions, and
+	// verificationIDByState indexes them by the `state` a wallet echoes
+	// back at /oid4vp/v1/response (there is nothing else in a direct_post
+	// body to resolve a session from).
+	//
+	// Kept in this store rather than a separate one: the shape is the same
+	// as everything else here — ephemeral, in-memory, TTL'd, lazily
+	// expired, gone on restart — and a second store would duplicate the
+	// mutex, the constructor and the random-token helper to hold a map.
+	// This does mean one process holds both roles' state; if the Verifier
+	// ever splits into its own service (as the AS split out of the
+	// issuer), this is the seam to cut along.
+	verifications         map[string]*VerificationSession
+	verificationIDByState map[string]string
 }
+
+// VerificationSession is one OID4VP verification: the Authorization
+// Request sent to a wallet, and whatever came back. Ported from the Java
+// verifier's SessionStore.VerificationSession record, with two shape
+// changes.
+//
+// First, DCQLQuery is the marshalled query object rather than the JSON
+// string the Java version stored: that version re-parsed its own JSON on
+// every response to recover the format and doctype_value, which is a round
+// trip through a string this process never needed to make.
+//
+// Second, the claims are held as a map instead of a JSON string, for the
+// same reason — GetResult in Java deserialized what CreateSession had just
+// serialized.
+type VerificationSession struct {
+	SessionID    string
+	State        string
+	Nonce        string
+	DCQLQuery    DCQLQuery
+	ResponseMode string
+	ClientID     string
+	ResponseURI  string
+	RequestJWT   string
+	// Status is one of: pending, request_sent, verified, failed.
+	Status         string
+	VPToken        string
+	VerifiedClaims map[string]any
+	Error          string
+	CreatedAt      time.Time
+}
+
+// DCQLQuery is the subset of the Digital Credentials Query Language (OID4VP
+// 1.0 Final §6) this Verifier both builds and reads back. Held here, in the
+// session package, because the session is what owns it for the duration of
+// a verification — internal/verifier builds it and reads it back off the
+// session when the response arrives.
+type DCQLQuery struct {
+	Credentials []DCQLCredentialQuery `json:"credentials"`
+}
+
+// DCQLCredentialQuery is one credential's query (OID4VP §6.1).
+type DCQLCredentialQuery struct {
+	ID     string           `json:"id"`
+	Format string           `json:"format"`
+	Meta   *DCQLMeta        `json:"meta,omitempty"`
+	Claims []DCQLClaimQuery `json:"claims,omitempty"`
+}
+
+// DCQLMeta is format-specific credential filtering (OID4VP §6.1): SD-JWT VC
+// filters on vct_values, mso_mdoc on a single doctype_value. Only the field
+// belonging to the query's format is emitted.
+type DCQLMeta struct {
+	VCTValues    []string `json:"vct_values,omitempty"`
+	DoctypeValue string   `json:"doctype_value,omitempty"`
+}
+
+// DCQLClaimQuery names one requested claim (OID4VP §6.3). Path is a single
+// segment for SD-JWT VC and two segments ([namespace, element]) for
+// mso_mdoc.
+type DCQLClaimQuery struct {
+	Path      []string `json:"path"`
+	Values    []string `json:"values,omitempty"`
+	Essential *bool    `json:"essential,omitempty"`
+}
+
+// verificationSessionTTL is how long a verification session stays usable
+// after creation. Far longer than parRequestTTL/authCodeTTL (60s each)
+// because the human is in the loop for all of it: they have to notice the
+// QR code, unlock a phone, open a wallet app, pick a credential and consent
+// to releasing it — a minute is not enough, and a wallet that has to
+// install or update first will take longer still. Five minutes is the same
+// window the Java verifier put on the Request Object's own `exp`, so the
+// session and the request it carries die together rather than one
+// outliving the other; anything much beyond that is just a stale QR code on
+// a screen somebody walked away from.
+const verificationSessionTTL = 5 * time.Minute
 
 // parRequestEntry is a stored PAR request plus its creation time, so
 // ConsumeParRequest can enforce parRequestTTL (RFC 9126 §2.2: request_uri
@@ -84,7 +175,103 @@ func NewStore() *Store {
 		identifiedSessions: make(map[string]identifiedSessionEntry),
 		issuedJTIByCode:    make(map[string]string),
 		revokedJTIs:        make(map[string]time.Time),
+
+		verifications:         make(map[string]*VerificationSession),
+		verificationIDByState: make(map[string]string),
 	}
+}
+
+// StoreVerification stores a freshly created verification session, stamping
+// CreatedAt so the TTL is measured from here (any caller-set value is
+// overwritten, matching CreateAuthCode).
+func (s *Store) StoreVerification(v VerificationSession) {
+	v.CreatedAt = time.Now()
+	s.mu.Lock()
+	s.verifications[v.SessionID] = &v
+	s.verificationIDByState[v.State] = v.SessionID
+	s.mu.Unlock()
+}
+
+// FindVerification returns the session with this id. ok is false if unknown
+// or past verificationSessionTTL — an expired session is deleted on read
+// (lazy expiry, no background sweeper, matching this store's style
+// throughout) and then treated exactly like one that never existed, so a
+// wallet arriving late gets the same answer as one arriving with a bad id.
+func (s *Store) FindVerification(sessionID string) (VerificationSession, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.findVerificationLocked(sessionID)
+}
+
+// FindVerificationByState resolves the `state` a wallet echoes back at
+// /oid4vp/v1/response to its session. Same expiry semantics as
+// FindVerification.
+func (s *Store) FindVerificationByState(state string) (VerificationSession, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	sessionID, ok := s.verificationIDByState[state]
+	if !ok {
+		return VerificationSession{}, false
+	}
+	return s.findVerificationLocked(sessionID)
+}
+
+// findVerificationLocked is FindVerification's body; callers hold s.mu.
+func (s *Store) findVerificationLocked(sessionID string) (VerificationSession, bool) {
+	v, ok := s.verifications[sessionID]
+	if !ok {
+		return VerificationSession{}, false
+	}
+	if time.Since(v.CreatedAt) > verificationSessionTTL {
+		s.deleteVerificationLocked(v)
+		return VerificationSession{}, false
+	}
+	return *v, true
+}
+
+func (s *Store) deleteVerificationLocked(v *VerificationSession) {
+	delete(s.verifications, v.SessionID)
+	delete(s.verificationIDByState, v.State)
+}
+
+// UpdateVerificationStatus advances a live session's status (pending →
+// request_sent). A no-op for an unknown or expired session: the status is
+// telemetry for the polling frontend, never a gate on anything, so there is
+// nothing for a caller to handle.
+func (s *Store) UpdateVerificationStatus(sessionID, status string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if v, ok := s.findVerificationPointerLocked(sessionID); ok {
+		v.Status = status
+	}
+}
+
+// UpdateVerificationResult records the outcome of a presentation against
+// its session — status "verified" with claims, or "failed" with the reason.
+func (s *Store) UpdateVerificationResult(sessionID, status, vpToken string, claims map[string]any, verifyErr string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if v, ok := s.findVerificationPointerLocked(sessionID); ok {
+		v.Status = status
+		v.VPToken = vpToken
+		v.VerifiedClaims = claims
+		v.Error = verifyErr
+	}
+}
+
+// findVerificationPointerLocked returns the stored session itself (not a
+// copy) for in-place mutation, applying the same lazy expiry as the read
+// path so an expired session cannot be resurrected by an update.
+func (s *Store) findVerificationPointerLocked(sessionID string) (*VerificationSession, bool) {
+	v, ok := s.verifications[sessionID]
+	if !ok {
+		return nil, false
+	}
+	if time.Since(v.CreatedAt) > verificationSessionTTL {
+		s.deleteVerificationLocked(v)
+		return nil, false
+	}
+	return v, true
 }
 
 // RandomToken returns a base64url, no-padding random token of n bytes.

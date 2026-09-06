@@ -1,7 +1,8 @@
-// Package httpapi exposes this authorization server's endpoints: RFC 8414
-// metadata, the HAIP authorization_code flow (PAR, authorize, token), the
-// end-user identification flow backing /authorize, and the JWK Set the
-// Credential Issuer verifies access tokens against.
+// Package httpapi exposes this service's endpoints: RFC 8414 metadata, the
+// HAIP authorization_code flow (PAR, authorize, token), the end-user
+// identification flow backing /authorize, the JWK Set the Credential Issuer
+// verifies access tokens against, and the OID4VP Verifier's own
+// /oid4vp/v1/* endpoints.
 package httpapi
 
 import (
@@ -14,6 +15,7 @@ import (
 	fikuacrypto "github.com/fikua/fikua-lab-idp/internal/crypto"
 	"github.com/fikua/fikua-lab-idp/internal/issuerclient"
 	"github.com/fikua/fikua-lab-idp/internal/oauth2"
+	"github.com/fikua/fikua-lab-idp/internal/verifier"
 )
 
 //go:embed authorize_error.html
@@ -32,13 +34,20 @@ type Handler struct {
 	signingKey *fikuacrypto.SigningKey
 	authz      *authz.Service
 	issuer     *issuerclient.Client
+	// verifier is nil when no OID4VP Verifier signing credential is
+	// configured (no FIKUA_DSS_URL) — in that case Routes registers no
+	// /oid4vp/v1/* endpoints at all, rather than serving ones that would
+	// fail on their first signature. See cmd/idp/main.go.
+	verifier *verifier.Service
 }
 
 // NewHandler builds an httpapi Handler. signingKey signs access tokens
 // and backs the JWK Set; authzService implements the OAuth2 flows; issuer
-// supplies the claim metadata the identification form renders.
-func NewHandler(baseURL string, signingKey *fikuacrypto.SigningKey, authzService *authz.Service, issuer *issuerclient.Client) *Handler {
-	return &Handler{baseURL: baseURL, signingKey: signingKey, authz: authzService, issuer: issuer}
+// supplies the claim metadata the identification form renders;
+// verifierService implements the OID4VP Verifier, and may be nil (see the
+// Handler.verifier field).
+func NewHandler(baseURL string, signingKey *fikuacrypto.SigningKey, authzService *authz.Service, issuer *issuerclient.Client, verifierService *verifier.Service) *Handler {
+	return &Handler{baseURL: baseURL, signingKey: signingKey, authz: authzService, issuer: issuer, verifier: verifierService}
 }
 
 // Routes registers this handler's endpoints on mux.
@@ -58,6 +67,19 @@ func (h *Handler) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /identify/claims", h.identifyClaims)
 	mux.HandleFunc("POST /identify/complete", h.identifyComplete)
 	mux.HandleFunc("POST /identify/reject", h.identifyReject)
+
+	if h.verifier != nil {
+		// The OID4VP Verifier's own endpoints, at the same paths the Java
+		// fikua-verifier module served them from so existing wallet deep
+		// links and frontend polls survive the port. Two of the four are
+		// wallet-facing (request, response); the other two belong to the
+		// verification frontend.
+		mux.HandleFunc("POST "+verifier.APIPrefix+"/session", h.oid4vpCreateSession)
+		mux.HandleFunc("GET "+verifier.APIPrefix+"/request/{id}", h.oid4vpRequestObject)
+		mux.HandleFunc("POST "+verifier.APIPrefix+"/request/{id}", h.oid4vpRequestObject)
+		mux.HandleFunc("POST "+verifier.APIPrefix+"/response", h.oid4vpResponse)
+		mux.HandleFunc("GET "+verifier.APIPrefix+"/result/{id}", h.oid4vpResult)
+	}
 }
 
 func (h *Handler) health(w http.ResponseWriter, r *http.Request) {

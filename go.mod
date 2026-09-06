@@ -2,7 +2,10 @@ module github.com/fikua/fikua-lab-idp
 
 go 1.26.5
 
-require github.com/lestrrat-go/jwx/v3 v3.2.0
+require (
+	github.com/fxamacker/cbor/v2 v2.9.3
+	github.com/lestrrat-go/jwx/v3 v3.2.0
+)
 
 require (
 	github.com/decred/dcrd/dcrec/secp256k1/v4 v4.4.1 // indirect
@@ -15,6 +18,7 @@ require (
 	github.com/lestrrat-go/option/v2 v2.0.0 // indirect
 	github.com/segmentio/asm v1.2.1 // indirect
 	github.com/valyala/fastjson v1.6.10 // indirect
+	github.com/x448/float16 v0.8.4 // indirect
 	golang.org/x/crypto v0.54.0 // indirect
 	golang.org/x/sys v0.47.0 // indirect
 )
