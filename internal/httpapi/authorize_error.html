@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Authorization Error — Fikua Lab IdP</title>
+    <style>
+        :root {
+            --bg: #FCFCFC;
+            --surface: #ffffff;
+            --border: #e2e8f0;
+            --text: #334155;
+            --text-muted: #64748b;
+            --heading: #0f172a;
+            --danger: #ef4444;
+            --danger-subtle: rgba(239, 68, 68, 0.1);
+            --radius: 8px;
+            --radius-lg: 12px;
+            --font: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+            --mono: 'SF Mono', 'Fira Code', 'JetBrains Mono', monospace;
+        }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: var(--font);
+            background: var(--bg);
+            color: var(--text);
+            line-height: 1.6;
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 1.5rem;
+        }
+        .card {
+            max-width: 480px;
+            width: 100%;
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: var(--radius-lg);
+            padding: 2rem;
+            text-align: center;
+        }
+        .icon {
+            width: 48px;
+            height: 48px;
+            margin: 0 auto 1.25rem;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            border-radius: 50%;
+            background: var(--danger-subtle);
+            color: var(--danger);
+        }
+        h1 {
+            color: var(--heading);
+            font-size: 1.25rem;
+            margin-bottom: 0.5rem;
+        }
+        p {
+            color: var(--text-muted);
+            margin-bottom: 1rem;
+        }
+        code {
+            display: block;
+            font-family: var(--mono);
+            font-size: 0.8rem;
+            background: var(--bg);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            padding: 0.6rem 0.75rem;
+            color: var(--text);
+            text-align: left;
+            word-break: break-word;
+        }
+    </style>
+</head>
+<body>
+    <div class="card">
+        <div class="icon">
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+        </div>
+        <h1>Authorization Error</h1>
+        <p>The authorization request could not be completed.</p>
+        <code>{{.Code}}: {{.Description}}</code>
+    </div>
+</body>
+</html>

@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Fikua Lab — Identification</title>
+    <link rel="icon" type="image/svg+xml" href="favicon.svg">
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <nav class="nav">
+        <div class="nav-inner">
+            <a href="/identify/" class="nav-brand">
+                <span class="nav-logo">F</span>
+                <span class="nav-name">Fikua Lab</span>
+            </a>
+            <div class="nav-links">
+                <span class="nav-label">Identification</span>
+                <button id="theme-toggle" class="theme-toggle" aria-label="Toggle theme" style="display: none;">
+                    <svg class="icon-sun" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>
+                    <svg class="icon-moon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+                </button>
+            </div>
+        </div>
+    </nav>
+
+    <main>
+        <div class="id-container">
+            <!-- Phase: Choose identification method -->
+            <div id="phase-identify" class="phase">
+                <div class="id-icon">
+                    <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
+                </div>
+                <h1>Identity Verification</h1>
+                <p class="id-sub">To issue your credential, we need to verify your identity. Choose an identification method below.</p>
+
+                <div class="method-list">
+                    <button id="method-cert" class="method-option">
+                        <div class="method-icon">
+                            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+                        </div>
+                        <div class="method-info">
+                            <span class="method-name">Digital Certificate</span>
+                            <span class="method-desc">Identify using a client certificate from your browser (X.509)</span>
+                        </div>
+                        <svg class="method-arrow" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
+                    </button>
+
+                    <button id="method-form" class="method-option">
+                        <div class="method-icon">
+                            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
+                        </div>
+                        <div class="method-info">
+                            <span class="method-name">Manual Form</span>
+                            <span class="method-desc">Enter your personal data manually</span>
+                        </div>
+                        <svg class="method-arrow" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
+                    </button>
+                </div>
+
+                <div class="id-actions">
+                    <button type="button" id="btn-deny" class="btn">Deny access</button>
+                </div>
+            </div>
+
+            <!-- Phase: Loading (redirect to cert.lab) -->
+            <div id="phase-loading" class="phase hidden">
+                <div class="id-icon">
+                    <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+                </div>
+                <h1>Certificate Verification</h1>
+                <p class="id-sub">Redirecting to the certificate portal...</p>
+                <div class="spinner"></div>
+            </div>
+
+            <!-- Phase: Manual Form -->
+            <div id="phase-form" class="phase hidden">
+                <div class="id-icon">
+                    <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
+                </div>
+                <h1>Enter Your Data</h1>
+                <p class="id-sub">Fill in the fields below for credential issuance.</p>
+                <form id="form-fields" class="form-card"></form>
+                <div class="id-actions">
+                    <button type="button" id="btn-form-cancel" class="btn">Cancel</button>
+                    <button type="button" id="btn-form-submit" class="btn btn-accent">Submit</button>
+                </div>
+            </div>
+
+            <!-- Phase: Confirm identity data (certificate + editable form) -->
+            <div id="phase-confirm" class="phase hidden">
+                <div class="id-icon id-icon--success">
+                    <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
+                </div>
+                <h1>Confirm Your Identity</h1>
+                <p class="id-sub">Data from your certificate is pre-filled below. Complete any missing fields and confirm.</p>
+
+                <div class="cert-summary">
+                    <span class="cert-summary-label">Certificate:</span>
+                    <span id="cert-summary-issuer" class="cert-summary-value">-</span>
+                    <span class="cert-summary-sep">&middot;</span>
+                    <span id="cert-summary-serial" class="cert-summary-value">-</span>
+                </div>
+
+                <form id="confirm-form-fields" class="form-card"></form>
+
+                <div class="id-actions">
+                    <button id="btn-cancel" class="btn">Cancel</button>
+                    <button id="btn-confirm" class="btn btn-accent">Confirm & Continue</button>
+                </div>
+            </div>
+
+            <!-- Phase: Submitting -->
+            <div id="phase-submitting" class="phase hidden">
+                <div class="id-icon">
+                    <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
+                </div>
+                <h1>Creating Credential</h1>
+                <p class="id-sub">Sending your identity data to the issuer...</p>
+                <div class="spinner"></div>
+            </div>
+
+            <!-- Phase: Success (redirecting to wallet) -->
+            <div id="phase-success" class="phase hidden">
+                <div class="id-icon id-icon--success">
+                    <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
+                </div>
+                <h1>Identity Verified</h1>
+                <p class="id-sub">Redirecting to your wallet...</p>
+                <div class="progress-bar"><div class="progress-fill"></div></div>
+            </div>
+
+            <!-- Phase: Error -->
+            <div id="phase-error" class="phase hidden">
+                <div class="id-icon id-icon--error">
+                    <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg>
+                </div>
+                <h1>Identification Failed</h1>
+                <p id="error-message" class="id-sub">An error occurred during the identification process.</p>
+                <div class="id-actions">
+                    <button id="btn-retry" class="btn btn-accent">Try Again</button>
+                </div>
+            </div>
+        </div>
+    </main>
+
+    <script src="app.js"></script>
+</body>
+</html>
