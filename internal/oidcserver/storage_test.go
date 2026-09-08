@@ -58,8 +58,14 @@ clients:
     redirect_uris:
       - "https://decidim.example.org/callback"
     scope: "openid"
-    verifier_credential_type: "urn:fikua:padro:barcelona:1"
-    verifier_claims: []
+
+credential_scopes:
+  - name: padro_barcelona
+    credential_type: "urn:fikua:padro:barcelona:1"
+    claims: []
+  - name: padro_girona
+    credential_type: "urn:fikua:padro:girona:1"
+    claims: []
 `
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		t.Fatalf("writing test registry: %v", err)

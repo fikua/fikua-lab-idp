@@ -34,6 +34,13 @@ type client struct {
 	// loginBasePath is where LoginURL sends the browser — this AS's own
 	// /oidc/v1/login page (see login.go), never the RP's own UI.
 	loginBasePath string
+	// registry backs IsScopeAllowed — a credential-selecting scope (e.g.
+	// "padro_barcelona") is client-agnostic, registered once per this
+	// bridge rather than per client (see oidcclients's package doc on why
+	// scope, not client registration, decides which credential a login
+	// requests), so admitting one has to consult the shared registry
+	// rather than anything on cfg itself.
+	registry *oidcclients.Registry
 }
 
 var _ op.Client = (*client)(nil)
@@ -86,19 +93,21 @@ func (c *client) RestrictAdditionalAccessTokenScopes() func([]string) []string {
 	return func(scopes []string) []string { return scopes }
 }
 
+// IsScopeAllowed gates any scope beyond the standard OIDC ones
+// op.ValidateAuthReqScopes always admits on its own (openid, profile,
+// email, phone, address, offline_access). The only additional scope this
+// bridge ever allows is a registered credential-selecting one (per
+// OpenID4VP 1.0 §5.5 — see oidcclients.Registry.ResolveCredentialScope's
+// doc comment) — anything else is rejected, dropped silently by op per
+// RFC 6749 §3.3 rather than failing the request outright.
 func (c *client) IsScopeAllowed(scope string) bool {
-	// op.ValidateAuthReqScopes already always allows openid/profile/
-	// email/phone/address/offline_access — this only gates any
-	// *additional* scope a client might request, and this bridge has no
-	// concept of one, so nothing beyond the standard scopes is ever
-	// allowed.
-	return false
+	return c.registry.IsCredentialScope(scope)
 }
 
 // IDTokenUserinfoClaimsAssertion is false: userinfo-sourced claims are
-// not duplicated into the ID Token, since a Relying Party configured
-// with an empty VerifierClaims (the Decidim case — see
-// oidcclients.Client.VerifierClaims's doc comment) must not receive any
+// not duplicated into the ID Token, since a login using a credential
+// scope configured with empty Claims (the Decidim case — see
+// oidcclients.CredentialScope.Claims's doc comment) must not receive any
 // claim through either channel.
 func (c *client) IDTokenUserinfoClaimsAssertion() bool { return false }
 

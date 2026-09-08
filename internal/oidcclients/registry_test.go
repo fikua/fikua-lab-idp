@@ -24,25 +24,65 @@ clients:
     redirect_uris:
       - "https://decidim.fikua.com/users/auth/fikua_verifier/callback"
     scope: "openid"
-    verifier_credential_type: "urn:fikua:padro:barcelona:1"
-    verifier_claims: []
+
+credential_scopes:
+  - name: padro_barcelona
+    credential_type: "urn:fikua:padro:barcelona:1"
+    claims: []
 `)
 	reg, err := Load(path)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	c, ok := reg.Lookup("decidim-barcelona")
-	if !ok {
+	if _, ok := reg.Lookup("decidim-barcelona"); !ok {
 		t.Fatal("expected decidim-barcelona to be registered")
-	}
-	if c.VerifierCredentialType != "urn:fikua:padro:barcelona:1" {
-		t.Errorf("VerifierCredentialType = %q", c.VerifierCredentialType)
-	}
-	if len(c.VerifierClaims) != 0 {
-		t.Errorf("VerifierClaims = %v, want empty (zero-knowledge)", c.VerifierClaims)
 	}
 	if _, ok := reg.Lookup("unknown-client"); ok {
 		t.Error("Lookup should not find an unregistered client")
+	}
+
+	cs, ok := reg.ResolveCredentialScope([]string{"openid", "padro_barcelona"})
+	if !ok {
+		t.Fatal("expected padro_barcelona to resolve")
+	}
+	if cs.CredentialType != "urn:fikua:padro:barcelona:1" {
+		t.Errorf("CredentialType = %q", cs.CredentialType)
+	}
+	if len(cs.Claims) != 0 {
+		t.Errorf("Claims = %v, want empty (zero-knowledge)", cs.Claims)
+	}
+
+	if _, ok := reg.ResolveCredentialScope([]string{"openid"}); ok {
+		t.Error("ResolveCredentialScope should not match a scope list with no registered credential scope")
+	}
+}
+
+func TestResolveCredentialScopePicksFirstMatch(t *testing.T) {
+	path := writeTestRegistry(t, `
+clients:
+  - client_id: multi-scope-client
+    token_endpoint_auth_method: none
+    redirect_uris: ["https://example.com/callback"]
+    scope: "openid"
+
+credential_scopes:
+  - name: padro_barcelona
+    credential_type: "urn:fikua:padro:barcelona:1"
+    claims: []
+  - name: padro_girona
+    credential_type: "urn:fikua:padro:girona:1"
+    claims: []
+`)
+	reg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	cs, ok := reg.ResolveCredentialScope([]string{"openid", "padro_girona", "padro_barcelona"})
+	if !ok {
+		t.Fatal("expected a match")
+	}
+	if cs.Name != "padro_girona" {
+		t.Errorf("resolved %q, want the first matching scope in request order (padro_girona)", cs.Name)
 	}
 }
 
@@ -53,7 +93,6 @@ clients:
     token_endpoint_auth_method: client_secret_basic
     redirect_uris: ["https://example.com/callback"]
     scope: "openid"
-    verifier_credential_type: "urn:fikua:padro:barcelona:1"
 `)
 	if _, err := Load(path); err == nil {
 		t.Fatal("expected Load to reject a non-\"none\" token_endpoint_auth_method")
@@ -67,7 +106,6 @@ clients:
     token_endpoint_auth_method: none
     redirect_uris: ["https://example.com/callback"]
     scope: "profile"
-    verifier_credential_type: "urn:fikua:padro:barcelona:1"
 `)
 	if _, err := Load(path); err == nil {
 		t.Fatal("expected Load to reject a scope missing \"openid\"")
@@ -81,14 +119,68 @@ clients:
     token_endpoint_auth_method: none
     redirect_uris: ["https://example.com/a"]
     scope: "openid"
-    verifier_credential_type: "urn:fikua:padro:barcelona:1"
   - client_id: dup
     token_endpoint_auth_method: none
     redirect_uris: ["https://example.com/b"]
     scope: "openid"
-    verifier_credential_type: "urn:fikua:padro:barcelona:1"
 `)
 	if _, err := Load(path); err == nil {
 		t.Fatal("expected Load to reject a duplicate client_id")
+	}
+}
+
+func TestLoadRejectsDuplicateCredentialScopeName(t *testing.T) {
+	path := writeTestRegistry(t, `
+clients:
+  - client_id: some-client
+    token_endpoint_auth_method: none
+    redirect_uris: ["https://example.com/a"]
+    scope: "openid"
+
+credential_scopes:
+  - name: padro_barcelona
+    credential_type: "urn:fikua:padro:barcelona:1"
+    claims: []
+  - name: padro_barcelona
+    credential_type: "urn:fikua:padro:barcelona:2"
+    claims: []
+`)
+	if _, err := Load(path); err == nil {
+		t.Fatal("expected Load to reject a duplicate credential scope name")
+	}
+}
+
+func TestLoadRejectsCredentialScopeCollidingWithStandardScope(t *testing.T) {
+	path := writeTestRegistry(t, `
+clients:
+  - client_id: some-client
+    token_endpoint_auth_method: none
+    redirect_uris: ["https://example.com/a"]
+    scope: "openid"
+
+credential_scopes:
+  - name: openid
+    credential_type: "urn:fikua:padro:barcelona:1"
+    claims: []
+`)
+	if _, err := Load(path); err == nil {
+		t.Fatal("expected Load to reject a credential scope named \"openid\"")
+	}
+}
+
+func TestLoadRejectsCredentialScopeMissingCredentialType(t *testing.T) {
+	path := writeTestRegistry(t, `
+clients:
+  - client_id: some-client
+    token_endpoint_auth_method: none
+    redirect_uris: ["https://example.com/a"]
+    scope: "openid"
+
+credential_scopes:
+  - name: padro_barcelona
+    claims: []
+`)
+	if _, err := Load(path); err == nil {
+		t.Fatal("expected Load to reject a credential scope with no credential_type")
 	}
 }

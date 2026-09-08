@@ -103,19 +103,31 @@ ATCA-attested wallets.
   endpoints, served by `zitadel/oidc` (endpoint paths are `zitadel/oidc`'s
   own defaults, not renamed).
 - `GET /oidc/v1/login`, `GET /oidc/v1/login/poll` — this bridge's own
-  login step: starts an OID4VP verification session for the requesting
-  client's configured credential type/claims, renders the QR, and
-  completes the OpenID Connect authorization once the Verifier confirms
-  a presentation.
+  login step: resolves the AuthRequest's own `scope` against the
+  registered credential-scope catalogue (see below), starts an OID4VP
+  verification session for that credential's type/claims, renders the
+  QR, and completes the OpenID Connect authorization once the Verifier
+  confirms a presentation.
 
 Every registered client is a **public client** (`token_endpoint_auth_method:
 none`) authenticated by mandatory PKCE (S256) — no client secrets are
-issued or stored. A client's `verifier_claims: []` (the intended Decidim
-configuration) means the ID Token's `sub` is the only thing that client
-ever learns: a stable, non-reversible pseudonym derived from the
-presented credential's holder-binding key, never anything disclosed by
-the credential itself. See `oidcclients.yaml.example` for the registry
-format.
+issued or stored.
+
+**Which credential a login presents is a property of the *scope*, not
+the client** — per OpenID4VP 1.0 §5.5 ("Using Scope Parameter to Request
+Presentations"), a scope value is an alias for a well-defined DCQL query,
+and the mapping is published by this bridge (`credential_scopes` in
+`oidcclients.yaml.example`), not fixed on a client's own registration.
+The same `client_id` can request a different credential per login purely
+by naming a different scope in its own `/authorize` call — e.g. one
+Decidim installation asking for a Barcelona padró for one participatory
+process and a Girona padró for another, with no separate client
+registration per credential or locality. A credential scope's
+`claims: []` (the intended Decidim configuration) means the ID Token's
+`sub` is the only thing that login ever learns: a stable, non-reversible
+pseudonym derived from the presented credential's holder-binding key,
+never anything disclosed by the credential itself. See
+`oidcclients.yaml.example` for the registry format.
 
 ## UI
 

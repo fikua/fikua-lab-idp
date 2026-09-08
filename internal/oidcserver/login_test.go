@@ -119,13 +119,23 @@ func noRedirectClient() *http.Client {
 // plus the code_verifier the eventual /token call needs.
 func startAuthorize(t *testing.T, b *testBridge) (authRequestID, codeVerifier string) {
 	t.Helper()
+	return startAuthorizeWithScope(t, b, "openid offline_access padro_barcelona")
+}
+
+// startAuthorizeWithScope is startAuthorize with an explicit scope — for
+// tests exercising OpenID4VP 1.0 §5.5's model directly: the SAME
+// registered client selecting a DIFFERENT credential per login purely by
+// varying its own scope, with no separate client registration per
+// credential (see TestSameClientDifferentCredentialScopePerLogin).
+func startAuthorizeWithScope(t *testing.T, b *testBridge, scope string) (authRequestID, codeVerifier string) {
+	t.Helper()
 	codeVerifier = "test-code-verifier-0123456789-abcdefghijklmno"
 	challenge := oidcS256Challenge(codeVerifier)
 
 	authorizeURL := b.srv.URL + BasePath + "/authorize?" + url.Values{
 		"client_id":             {"decidim-barcelona"},
 		"response_type":         {"code"},
-		"scope":                 {"openid offline_access"},
+		"scope":                 {scope},
 		"redirect_uri":          {"https://decidim.example.org/callback"},
 		"state":                 {"xyz"},
 		"code_challenge":        {challenge},
@@ -186,6 +196,71 @@ func TestLoginPageStartsVerificationSession(t *testing.T) {
 	sessID2, _ := b.storageFor(t).internalStore().getVerificationSession(authRequestID)
 	if sessID1 != sessID2 {
 		t.Errorf("a second page load must not start a second verification session: %q != %q", sessID1, sessID2)
+	}
+}
+
+// TestSameClientDifferentCredentialScopePerLogin is the direct
+// demonstration of OpenID4VP 1.0 §5.5's model this bridge implements:
+// ONE registered client_id (decidim-barcelona in testRegistry, standing
+// in for a single Decidim installation) requests a DIFFERENT credential
+// per login purely by naming a different scope — no separate client
+// registration, and nothing about the client's own oidcclients.Client
+// entry changes between the two logins. This is what makes a single
+// Relying Party able to ask for a Barcelona padró for one participatory
+// process and a Girona padró for another, entirely by what its own
+// /authorize call sends.
+func TestSameClientDifferentCredentialScopePerLogin(t *testing.T) {
+	b := newTestBridge(t)
+
+	barcelonaAuthReqID, _ := startAuthorizeWithScope(t, b, "openid padro_barcelona")
+	if resp, err := http.Get(b.srv.URL + LoginPath + "?id=" + barcelonaAuthReqID); err != nil {
+		t.Fatal(err)
+	} else {
+		resp.Body.Close()
+	}
+	barcelonaSessID, ok := b.storage.internalStore().getVerificationSession(barcelonaAuthReqID)
+	if !ok {
+		t.Fatal("expected a verification session for the Barcelona login")
+	}
+	barcelonaSession, _ := b.sessions.FindVerification(barcelonaSessID)
+	if got := barcelonaSession.DCQLQuery.Credentials[0].Meta.VCTValues[0]; got != "urn:fikua:padro:barcelona:1" {
+		t.Errorf("Barcelona login requested credential type %q", got)
+	}
+
+	gironaAuthReqID, _ := startAuthorizeWithScope(t, b, "openid padro_girona")
+	if resp, err := http.Get(b.srv.URL + LoginPath + "?id=" + gironaAuthReqID); err != nil {
+		t.Fatal(err)
+	} else {
+		resp.Body.Close()
+	}
+	gironaSessID, ok := b.storage.internalStore().getVerificationSession(gironaAuthReqID)
+	if !ok {
+		t.Fatal("expected a verification session for the Girona login")
+	}
+	gironaSession, _ := b.sessions.FindVerification(gironaSessID)
+	if got := gironaSession.DCQLQuery.Credentials[0].Meta.VCTValues[0]; got != "urn:fikua:padro:girona:1" {
+		t.Errorf("Girona login requested credential type %q", got)
+	}
+
+	if barcelonaSessID == gironaSessID {
+		t.Error("the two logins must not share a verification session")
+	}
+}
+
+// TestLoginRejectsUnknownScope covers the case a login's scope names no
+// registered credential at all — must fail rather than silently
+// proceeding with no credential requested.
+func TestLoginRejectsUnknownScope(t *testing.T) {
+	b := newTestBridge(t)
+	authRequestID, _ := startAuthorizeWithScope(t, b, "openid")
+
+	resp, err := http.Get(b.srv.URL + LoginPath + "?id=" + authRequestID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400 (no credential scope requested)", resp.StatusCode)
 	}
 }
 
