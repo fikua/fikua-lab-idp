@@ -114,6 +114,35 @@ func TestHandleResponseSingleCredentialEndToEnd(t *testing.T) {
 	}
 }
 
+// pidAndPadroCredentials is the PID + Barcelona padró attestation pair
+// every multi-credential test below requests — factored out because
+// SonarCloud's duplication check (and human readers) shouldn't have to
+// look past the same two CredentialRequest literals three times to find
+// what actually differs between these tests: which presentations are
+// built and how the wallet responds.
+func pidAndPadroCredentials() []CredentialRequest {
+	return []CredentialRequest{
+		{ID: "pid", CredentialType: "eu.europa.ec.eudi.pid.1", Claims: []string{"given_name"}, Format: FormatSDJWTVC},
+		{ID: "padro_attestation", CredentialType: "urn:fikua:padro:barcelona:1", Claims: []string{"resident_municipality"}, Format: FormatSDJWTVC},
+	}
+}
+
+// createMultiCredentialSession creates a session requesting
+// pidAndPadroCredentials and returns both the CreateSession result and the
+// session's own nonce (needed to build a matching KB-JWT).
+func createMultiCredentialSession(t *testing.T, svc *Service) (CreateSessionResult, string) {
+	t.Helper()
+	created, err := svc.CreateSession(CreateSessionRequest{Credentials: pidAndPadroCredentials()})
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	sess, ok := svc.sessions.FindVerification(created.SessionID)
+	if !ok {
+		t.Fatal("session not found after creation")
+	}
+	return created, sess.Nonce
+}
+
 // TestHandleResponseMultiCredentialSameHolderSucceeds is this feature's
 // central case: a PID and a bound attestation (modeled on the Barcelona
 // padró's cryptographically_bound_to relationship), presented together by
@@ -123,19 +152,7 @@ func TestHandleResponseMultiCredentialSameHolderSucceeds(t *testing.T) {
 	issuer := newTestIssuerKey(t)
 	holderPriv, holderPub := testHolderKey(t)
 
-	created, err := svc.CreateSession(CreateSessionRequest{
-		Credentials: []CredentialRequest{
-			{ID: "pid", CredentialType: "eu.europa.ec.eudi.pid.1", Claims: []string{"given_name"}, Format: FormatSDJWTVC},
-			{ID: "padro_attestation", CredentialType: "urn:fikua:padro:barcelona:1", Claims: []string{"resident_municipality"}, Format: FormatSDJWTVC},
-		},
-	})
-	if err != nil {
-		t.Fatalf("CreateSession: %v", err)
-	}
-	sess, ok := svc.sessions.FindVerification(created.SessionID)
-	if !ok {
-		t.Fatal("session not found after creation")
-	}
+	created, nonce := createMultiCredentialSession(t, svc)
 
 	pidPresentation := buildSDJWTPresentation(t, issuer, sdJWTPresentationOpts{
 		vct:             "eu.europa.ec.eudi.pid.1",
@@ -143,7 +160,7 @@ func TestHandleResponseMultiCredentialSameHolderSucceeds(t *testing.T) {
 		holderPublicJWK: holderPub,
 		holderPrivKey:   holderPriv,
 		audience:        created.ClientID,
-		nonce:           sess.Nonce,
+		nonce:           nonce,
 	})
 	padroPresentation := buildSDJWTPresentation(t, issuer, sdJWTPresentationOpts{
 		vct:             "urn:fikua:padro:barcelona:1",
@@ -151,7 +168,7 @@ func TestHandleResponseMultiCredentialSameHolderSucceeds(t *testing.T) {
 		holderPublicJWK: holderPub,
 		holderPrivKey:   holderPriv,
 		audience:        created.ClientID,
-		nonce:           sess.Nonce,
+		nonce:           nonce,
 	})
 
 	vpTokenJSON := map[string]any{
@@ -188,19 +205,7 @@ func TestHandleResponseMultiCredentialDifferentHolderFails(t *testing.T) {
 	holderAPriv, holderAPub := testHolderKey(t)
 	holderBPriv, holderBPub := testHolderKey(t)
 
-	created, err := svc.CreateSession(CreateSessionRequest{
-		Credentials: []CredentialRequest{
-			{ID: "pid", CredentialType: "eu.europa.ec.eudi.pid.1", Claims: []string{"given_name"}, Format: FormatSDJWTVC},
-			{ID: "padro_attestation", CredentialType: "urn:fikua:padro:barcelona:1", Claims: []string{"resident_municipality"}, Format: FormatSDJWTVC},
-		},
-	})
-	if err != nil {
-		t.Fatalf("CreateSession: %v", err)
-	}
-	sess, ok := svc.sessions.FindVerification(created.SessionID)
-	if !ok {
-		t.Fatal("session not found after creation")
-	}
+	created, nonce := createMultiCredentialSession(t, svc)
 
 	pidPresentation := buildSDJWTPresentation(t, issuer, sdJWTPresentationOpts{
 		vct:             "eu.europa.ec.eudi.pid.1",
@@ -208,7 +213,7 @@ func TestHandleResponseMultiCredentialDifferentHolderFails(t *testing.T) {
 		holderPublicJWK: holderAPub,
 		holderPrivKey:   holderAPriv,
 		audience:        created.ClientID,
-		nonce:           sess.Nonce,
+		nonce:           nonce,
 	})
 	// A genuine, individually-valid padró attestation — but bound to a
 	// DIFFERENT holder key than the PID above.
@@ -218,7 +223,7 @@ func TestHandleResponseMultiCredentialDifferentHolderFails(t *testing.T) {
 		holderPublicJWK: holderBPub,
 		holderPrivKey:   holderBPriv,
 		audience:        created.ClientID,
-		nonce:           sess.Nonce,
+		nonce:           nonce,
 	})
 
 	vpTokenJSON := map[string]any{
@@ -255,19 +260,7 @@ func TestHandleResponseMissingCredentialFails(t *testing.T) {
 	issuer := newTestIssuerKey(t)
 	holderPriv, holderPub := testHolderKey(t)
 
-	created, err := svc.CreateSession(CreateSessionRequest{
-		Credentials: []CredentialRequest{
-			{ID: "pid", CredentialType: "eu.europa.ec.eudi.pid.1", Claims: []string{"given_name"}, Format: FormatSDJWTVC},
-			{ID: "padro_attestation", CredentialType: "urn:fikua:padro:barcelona:1", Claims: []string{"resident_municipality"}, Format: FormatSDJWTVC},
-		},
-	})
-	if err != nil {
-		t.Fatalf("CreateSession: %v", err)
-	}
-	sess, ok := svc.sessions.FindVerification(created.SessionID)
-	if !ok {
-		t.Fatal("session not found after creation")
-	}
+	created, nonce := createMultiCredentialSession(t, svc)
 
 	// Only the PID is presented — the wallet withheld the padró attestation.
 	pidPresentation := buildSDJWTPresentation(t, issuer, sdJWTPresentationOpts{
@@ -276,7 +269,7 @@ func TestHandleResponseMissingCredentialFails(t *testing.T) {
 		holderPublicJWK: holderPub,
 		holderPrivKey:   holderPriv,
 		audience:        created.ClientID,
-		nonce:           sess.Nonce,
+		nonce:           nonce,
 	})
 	vpTokenJSON := map[string]any{"pid": []any{pidPresentation}}
 	rawBytes, err := json.Marshal(vpTokenJSON)

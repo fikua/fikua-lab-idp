@@ -33,6 +33,23 @@ func newTestServerWithVerifier(t *testing.T) *httptest.Server {
 	return srv
 }
 
+// createDefaultSession POSTs an empty (default-PID) session request to srv
+// and decodes the response body — the setup step every test below needs
+// before it can exercise a session-scoped endpoint (request/response/result).
+func createDefaultSession(t *testing.T, srv string) map[string]string {
+	t.Helper()
+	resp, err := http.Post(srv+"/oid4vp/v1/session", "application/json", strings.NewReader(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var created map[string]string
+	if err := json.NewDecoder(resp.Body).Decode(&created); err != nil {
+		t.Fatal(err)
+	}
+	return created
+}
+
 func TestOid4vpCreateSessionDefaultsToPID(t *testing.T) {
 	srv := newTestServerWithVerifier(t).URL
 
@@ -72,16 +89,7 @@ func TestOid4vpCreateSessionMultiCredential(t *testing.T) {
 
 func TestOid4vpRequestObjectServesJARContentType(t *testing.T) {
 	srv := newTestServerWithVerifier(t).URL
-
-	createResp, err := http.Post(srv+"/oid4vp/v1/session", "application/json", strings.NewReader(`{}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer createResp.Body.Close()
-	var created map[string]string
-	if err := json.NewDecoder(createResp.Body).Decode(&created); err != nil {
-		t.Fatal(err)
-	}
+	created := createDefaultSession(t, srv)
 
 	resp, err := http.Get(srv + "/oid4vp/v1/request/" + created["session_id"])
 	if err != nil {
@@ -112,16 +120,7 @@ func TestOid4vpRequestObjectUnknownSessionIs404(t *testing.T) {
 
 func TestOid4vpResponseRejectsMissingVPToken(t *testing.T) {
 	srv := newTestServerWithVerifier(t).URL
-
-	createResp, err := http.Post(srv+"/oid4vp/v1/session", "application/json", strings.NewReader(`{}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer createResp.Body.Close()
-	var created map[string]string
-	if err := json.NewDecoder(createResp.Body).Decode(&created); err != nil {
-		t.Fatal(err)
-	}
+	created := createDefaultSession(t, srv)
 
 	form := url.Values{"state": {created["state"]}}
 	resp, err := http.PostForm(srv+"/oid4vp/v1/response", form)
@@ -136,16 +135,7 @@ func TestOid4vpResponseRejectsMissingVPToken(t *testing.T) {
 
 func TestOid4vpResultPendingBeforePresentation(t *testing.T) {
 	srv := newTestServerWithVerifier(t).URL
-
-	createResp, err := http.Post(srv+"/oid4vp/v1/session", "application/json", strings.NewReader(`{}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer createResp.Body.Close()
-	var created map[string]string
-	if err := json.NewDecoder(createResp.Body).Decode(&created); err != nil {
-		t.Fatal(err)
-	}
+	created := createDefaultSession(t, srv)
 
 	resp, err := http.Get(srv + "/oid4vp/v1/result/" + created["session_id"])
 	if err != nil {
