@@ -67,6 +67,7 @@ openssl ecparam -genkey -name prime256v1 -noout -out certs/idp-key.pem
 | `FIKUA_CREDENTIAL_ISSUER_URL` | `https://issuer.fikua.com` | the Credential Issuer tokens are minted for (`aud`) |
 | `FIKUA_CERTS_DIR` | `./certs` | holds `idp-key.pem`, and optionally `root-ca.crt` for Wallet Provider trust pinning |
 | `FIKUA_ISSUABLE_SCHEMES` | `urn:eudi:pid:1,...` | schemes the identification form may collect claims for |
+| `OIDC_CLIENTS_PATH` | *(unset)* | path to the OpenID Connect Relying Party registry YAML (see `oidcclients.yaml.example`) — unset disables the whole `/oidc/v1/*` bridge; requires `FIKUA_DSS_URL` also be set |
 
 ## API
 
@@ -83,6 +84,38 @@ UI) — same convention as `fikua-lab-issuer` and
 - `GET /oid4vci/v1/revoked-tokens` — revoked `jti` denylist, polled by the Credential Issuer.
 - `GET /identify/claims`, `POST /identify/complete`, `POST /identify/reject` — the identification UI's own backend (same-origin, not wallet-facing).
 - `GET /health` — health check.
+
+### OpenID Connect Core (`/oidc/v1/*`, when `OIDC_CLIENTS_PATH` is set)
+
+A separate OpenID Connect Core 1.0 surface for classic web Relying
+Parties (e.g. Decidim's own `omniauth-openid-connect`) that want a
+standard browser-based login, backed by a verifiable-credential
+presentation instead of a password. Built on
+[`zitadel/oidc`](https://github.com/zitadel/oidc)'s `pkg/op` — an OpenID
+Foundation-certified OP implementation — layered over this bridge's own
+`op.Storage`; see `internal/oidcserver`'s package doc for the full design
+and why this is a separate client model from `/oid4vci/v1/*`'s
+ATCA-attested wallets.
+
+- `GET /oidc/v1/authorize`, `POST /oidc/v1/oauth/token`, `GET
+  /oidc/v1/.well-known/openid-configuration`, `GET /oidc/v1/keys`, `GET
+  /oidc/v1/userinfo` — standard OpenID Connect Core / discovery
+  endpoints, served by `zitadel/oidc` (endpoint paths are `zitadel/oidc`'s
+  own defaults, not renamed).
+- `GET /oidc/v1/login`, `GET /oidc/v1/login/poll` — this bridge's own
+  login step: starts an OID4VP verification session for the requesting
+  client's configured credential type/claims, renders the QR, and
+  completes the OpenID Connect authorization once the Verifier confirms
+  a presentation.
+
+Every registered client is a **public client** (`token_endpoint_auth_method:
+none`) authenticated by mandatory PKCE (S256) — no client secrets are
+issued or stored. A client's `verifier_claims: []` (the intended Decidim
+configuration) means the ID Token's `sub` is the only thing that client
+ever learns: a stable, non-reversible pseudonym derived from the
+presented credential's holder-binding key, never anything disclosed by
+the credential itself. See `oidcclients.yaml.example` for the registry
+format.
 
 ## UI
 

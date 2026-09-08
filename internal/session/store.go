@@ -108,8 +108,19 @@ type VerificationSession struct {
 	// key here — there is no separate flat-field path for it.
 	VPTokens       map[string]string
 	VerifiedClaims map[string]map[string]any
-	Error          string
-	CreatedAt      time.Time
+	// SubjectID is a stable, non-reversible pseudonym derived from the
+	// presented credential's holder-binding key (SHA-256 of its JWK
+	// thumbprint) — set on every successful verification, even one that
+	// discloses zero claims (a Relying Party may request no claims at
+	// all and still need a stable "same person, next time" identifier;
+	// see internal/oidcserver, which is the only consumer of this
+	// field). Never derived from, or reversible to, any disclosed claim
+	// or the credential's issuer signature — only from the holder's own
+	// presentation key, so no two different credentials ever collide
+	// and the same credential always reproduces the same value.
+	SubjectID string
+	Error     string
+	CreatedAt time.Time
 }
 
 // DCQLQuery is the subset of the Digital Credentials Query Language (OID4VP
@@ -303,13 +314,16 @@ func (s *Store) UpdateVerificationStatus(sessionID, status string) {
 // "failed" with the reason. vpTokens and claims are both keyed by
 // DCQLCredentialQuery.ID; a failed verification may still pass a partial
 // vpTokens (whatever was received) for diagnostics, with claims nil.
-func (s *Store) UpdateVerificationResult(sessionID, status string, vpTokens map[string]string, claims map[string]map[string]any, verifyErr string) {
+// subjectID is only meaningful (non-empty) on a "verified" status — see
+// VerificationSession.SubjectID's doc comment.
+func (s *Store) UpdateVerificationResult(sessionID, status string, vpTokens map[string]string, claims map[string]map[string]any, subjectID, verifyErr string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if v, ok := s.findVerificationPointerLocked(sessionID); ok {
 		v.Status = status
 		v.VPTokens = vpTokens
 		v.VerifiedClaims = claims
+		v.SubjectID = subjectID
 		v.Error = verifyErr
 	}
 }
