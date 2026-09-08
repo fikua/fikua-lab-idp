@@ -1,21 +1,14 @@
 package oidcserver
 
 import (
-	"crypto/ecdsa"
-	"crypto/elliptic"
-	"crypto/rand"
 	"crypto/sha256"
-	"crypto/x509"
-	"crypto/x509/pkix"
 	"encoding/base64"
 	"encoding/json"
 	"io"
-	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"testing"
-	"time"
 
 	"github.com/zitadel/oidc/v3/pkg/op"
 
@@ -38,24 +31,7 @@ func oidcS256Challenge(verifier string) string {
 // into that same store without needing a real wallet.
 func newTestVerifierService(t *testing.T, sessions *session.Store) *verifier.Service {
 	t.Helper()
-	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
-	template := &x509.Certificate{
-		SerialNumber: big.NewInt(1),
-		Subject:      pkix.Name{CommonName: "test-verifier"},
-		NotBefore:    time.Now().Add(-time.Hour),
-		NotAfter:     time.Now().Add(time.Hour),
-	}
-	der, err := x509.CreateCertificate(rand.Reader, template, template, &priv.PublicKey, priv)
-	if err != nil {
-		t.Fatal(err)
-	}
-	signingKey, err := fikuacrypto.NewRequestSigningKey(priv, [][]byte{der})
-	if err != nil {
-		t.Fatal(err)
-	}
+	signingKey := fikuacrypto.NewTestRequestSigningKey(t)
 	return verifier.NewService("https://verifier.test.fikua.internal", signingKey, sessions, verifier.ResponseModeDirectPost)
 }
 

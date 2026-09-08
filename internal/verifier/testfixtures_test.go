@@ -22,32 +22,13 @@ import (
 	fikuacrypto "github.com/fikua/fikua-lab-idp/internal/crypto"
 )
 
-// testSigningKey builds a *fikuacrypto.RequestSigningKey backed by a fresh
-// in-memory ECDSA P-256 key and a self-signed leaf certificate, standing in
-// for the DSS-issued key every real deployment uses. Good enough for
-// exercising this Verifier's own signing/x509_hash logic — nothing here
-// checks the certificate against a real trust anchor.
+// testSigningKey is this package's own name for
+// fikuacrypto.NewTestRequestSigningKey — see that constructor's doc
+// comment (internal/crypto/testkeys.go) for why it lives there instead
+// of being duplicated per test package.
 func testSigningKey(t *testing.T) *fikuacrypto.RequestSigningKey {
 	t.Helper()
-	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
-	template := &x509.Certificate{
-		SerialNumber: big.NewInt(1),
-		Subject:      pkix.Name{CommonName: "test-verifier"},
-		NotBefore:    time.Now().Add(-time.Hour),
-		NotAfter:     time.Now().Add(time.Hour),
-	}
-	der, err := x509.CreateCertificate(rand.Reader, template, template, &priv.PublicKey, priv)
-	if err != nil {
-		t.Fatal(err)
-	}
-	key, err := fikuacrypto.NewRequestSigningKey(priv, [][]byte{der})
-	if err != nil {
-		t.Fatal(err)
-	}
-	return key
+	return fikuacrypto.NewTestRequestSigningKey(t)
 }
 
 // testHolderKey generates a fresh ECDSA P-256 keypair for a credential
