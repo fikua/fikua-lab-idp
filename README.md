@@ -97,10 +97,11 @@ Foundation-certified OP implementation — layered over this bridge's own
 and why this is a separate client model from `/oid4vci/v1/*`'s
 ATCA-attested wallets.
 
-- `GET /oidc/v1/authorize`, `POST /oidc/v1/token`, `GET
+- `GET /oidc/v1/authorize`, `POST /oidc/v1/oauth/token`, `GET
   /oidc/v1/.well-known/openid-configuration`, `GET /oidc/v1/keys`, `GET
   /oidc/v1/userinfo` — standard OpenID Connect Core / discovery
-  endpoints, served by `zitadel/oidc`.
+  endpoints, served by `zitadel/oidc` (endpoint paths are `zitadel/oidc`'s
+  own defaults, not renamed).
 - `GET /oidc/v1/login`, `GET /oidc/v1/login/poll` — this bridge's own
   login step: starts an OID4VP verification session for the requesting
   client's configured credential type/claims, renders the QR, and

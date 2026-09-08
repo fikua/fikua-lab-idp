@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/zitadel/oidc/v3/pkg/op"
+
 	"github.com/fikua/fikua-lab-idp/internal/oidcclients"
 	"github.com/fikua/fikua-lab-idp/internal/session"
 	"github.com/fikua/fikua-lab-idp/internal/verifier"
@@ -28,6 +30,19 @@ type LoginHandler struct {
 	clients      *oidcclients.Registry
 	verifier     *verifier.Service
 	authCallback func(ctx context.Context, requestID string) string
+	// issuer is this bridge's own issuer identifier (baseURL+BasePath).
+	// authCallback (op.AuthCallbackURL) builds an absolute URL from
+	// whatever issuer op.IssuerFromContext finds on the context it is
+	// called with — which is normally set by op's own request
+	// interceptor (see op.CreateRouter), but /oidc/v1/login and
+	// /oidc/v1/login/poll are this bridge's OWN handlers, mounted
+	// alongside the op.Provider rather than behind it, so a request's
+	// context here never carries that value. Every call site below
+	// injects it explicitly via op.ContextWithIssuer instead of passing
+	// r.Context() as-is — omitting this produces a relative,
+	// unfollowable redirect (caught by this package's own
+	// TestFullLoginToTokenFlow).
+	issuer string
 }
 
 // NewLoginHandler builds a LoginHandler. authCallbackURL is
@@ -35,8 +50,18 @@ type LoginHandler struct {
 // is the one place both the op.Provider and this handler are
 // constructed, rather than this package importing op.Provider itself and
 // creating a circular build step with whatever wires Storage into it.
-func NewLoginHandler(storage *Storage, clients *oidcclients.Registry, verifierService *verifier.Service, authCallbackURL func(context.Context, string) string) *LoginHandler {
-	return &LoginHandler{storage: storage, clients: clients, verifier: verifierService, authCallback: authCallbackURL}
+// issuer is that same provider's own issuer identifier — see the
+// LoginHandler.issuer field's doc comment for why this handler cannot
+// simply read it off an incoming request's context the way op's own
+// handlers do.
+func NewLoginHandler(storage *Storage, clients *oidcclients.Registry, verifierService *verifier.Service, authCallbackURL func(context.Context, string) string, issuer string) *LoginHandler {
+	return &LoginHandler{storage: storage, clients: clients, verifier: verifierService, authCallback: authCallbackURL, issuer: issuer}
+}
+
+// callbackURL is authCallback with this bridge's own issuer injected
+// into the context — see the issuer field's doc comment.
+func (h *LoginHandler) callbackURL(ctx context.Context, requestID string) string {
+	return h.authCallback(op.ContextWithIssuer(ctx, h.issuer), requestID)
 }
 
 // ServeHTTP handles GET /oidc/v1/login?id={authRequestID}. Renders the QR
@@ -58,7 +83,7 @@ func (h *LoginHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// Re-visiting a completed login (e.g. a refreshed tab) — send the
 		// browser straight to the callback rather than starting a second,
 		// pointless verification session.
-		http.Redirect(w, r, h.authCallback(r.Context(), ar.id), http.StatusFound)
+		http.Redirect(w, r, h.callbackURL(r.Context(), ar.id), http.StatusFound)
 		return
 	}
 
@@ -115,7 +140,7 @@ func (h *LoginHandler) PollHandler(w http.ResponseWriter, r *http.Request) {
 	if ar.Done() {
 		writeJSONStatus(w, http.StatusOK, map[string]string{
 			"status":   "done",
-			"redirect": h.authCallback(r.Context(), ar.id),
+			"redirect": h.callbackURL(r.Context(), ar.id),
 		})
 		return
 	}
@@ -145,7 +170,7 @@ func (h *LoginHandler) PollHandler(w http.ResponseWriter, r *http.Request) {
 		ar.doneAt = time.Now()
 		writeJSONStatus(w, http.StatusOK, map[string]string{
 			"status":   "done",
-			"redirect": h.authCallback(r.Context(), ar.id),
+			"redirect": h.callbackURL(r.Context(), ar.id),
 		})
 	case "failed":
 		writeJSONStatus(w, http.StatusOK, map[string]string{"status": "error", "error": v.Error})

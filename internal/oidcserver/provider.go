@@ -76,6 +76,6 @@ func New(clientsPath string, signingKey *fikuacrypto.SigningKey, verifierService
 		return nil, fmt.Errorf("oidcserver: building OpenID Connect provider: %w", err)
 	}
 
-	login := NewLoginHandler(storage, registry, verifierService, op.AuthCallbackURL(provider))
+	login := NewLoginHandler(storage, registry, verifierService, op.AuthCallbackURL(provider), baseURL+BasePath)
 	return &Server{Provider: provider, Login: login}, nil
 }
