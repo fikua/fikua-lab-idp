@@ -72,6 +72,15 @@ type Config struct {
 	// from an Issuer compromise.
 	DSSVerifierCredentialID string
 	DSSCredentialPassword   string
+	// OIDCClientsPath, if set, points at the YAML registry of classic web
+	// Relying Parties (see internal/oidcclients) allowed to use this AS's
+	// OpenID Connect Core endpoints (internal/oidcserver). Empty means
+	// that bridge is entirely disabled — no /oidc/v1/* routes registered
+	// at all, matching DSSURL's own "absent config means absent feature"
+	// stance. Requires the OID4VP Verifier (DSSURL) to also be configured,
+	// since every registered client's login method is presenting a
+	// credential to it — see oidcserver.New's own check.
+	OIDCClientsPath string
 }
 
 // Load reads configuration from environment variables, applying defaults
@@ -92,6 +101,7 @@ func Load() Config {
 		DSSClientSecret:         getenv("FIKUA_DSS_CLIENT_SECRET", ""),
 		DSSVerifierCredentialID: getenv("FIKUA_DSS_VERIFIER_CREDENTIAL_ID", "fikua-verifier-001"),
 		DSSCredentialPassword:   getenv("FIKUA_DSS_CREDENTIAL_PASSWORD", ""),
+		OIDCClientsPath:         getenv("OIDC_CLIENTS_PATH", ""),
 	}
 }
 

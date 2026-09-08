@@ -64,7 +64,7 @@ func TestVerificationUpdatesRespectExpiry(t *testing.T) {
 	}
 
 	store.verifications["sess-2"].CreatedAt = time.Now().Add(-verificationSessionTTL - time.Second)
-	store.UpdateVerificationResult("sess-2", "verified", map[string]string{"requested_credential": "vp"}, map[string]map[string]any{"requested_credential": {"a": 1}}, "")
+	store.UpdateVerificationResult("sess-2", "verified", map[string]string{"requested_credential": "vp"}, map[string]map[string]any{"requested_credential": {"a": 1}}, "subj-1", "")
 	if _, ok := store.FindVerification("sess-2"); ok {
 		t.Fatal("an update must not resurrect an expired session")
 	}

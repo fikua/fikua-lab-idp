@@ -18,6 +18,7 @@ import (
 	"crypto"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -312,14 +313,44 @@ func (s *Service) HandleResponse(ctx context.Context, req ResponseRequest) (Resu
 	}
 
 	vpTokens := allVPTokens(parseVPToken(rawVPToken), v.DCQLQuery)
-	claims, err := s.verifyPresentations(ctx, v, vpTokens)
+	claims, holderKeys, err := s.verifyPresentations(ctx, v, vpTokens)
 	if err != nil {
-		s.sessions.UpdateVerificationResult(v.SessionID, "failed", vpTokens, nil, err.Error())
+		s.sessions.UpdateVerificationResult(v.SessionID, "failed", vpTokens, nil, "", err.Error())
 		return errorResult("invalid_presentation", err.Error()), v, nil
 	}
 
-	s.sessions.UpdateVerificationResult(v.SessionID, "verified", vpTokens, claims, "")
+	subjectID, err := subjectIDFromHolderKeys(holderKeys)
+	if err != nil {
+		s.sessions.UpdateVerificationResult(v.SessionID, "failed", vpTokens, nil, "", err.Error())
+		return errorResult("invalid_presentation", err.Error()), v, nil
+	}
+
+	s.sessions.UpdateVerificationResult(v.SessionID, "verified", vpTokens, claims, subjectID, "")
 	return successResult(mergeClaims(claims)), v, nil
+}
+
+// subjectIDFromHolderKeys derives this presentation's stable subject
+// pseudonym: SHA-256 of the presented credential's holder-binding key
+// thumbprint, hex-encoded. Callers needing a "same person, next time"
+// identifier without any disclosed claim (see internal/oidcserver) use
+// this rather than anything derived from the credential's content — a
+// SubjectID never changes for the same physical credential and never
+// collides across different ones, independent of which (if any) claims
+// were requested. verifyPresentations already required every credential
+// in a multi-credential presentation to share one holder key
+// (verifyCrossCredentialBinding), so any single entry is representative;
+// an mdoc-only presentation has no holder key at all yet (see
+// verifyPresentation's doc comment) and cannot mint a SubjectID today.
+func subjectIDFromHolderKeys(holderKeys map[string]jwk.Key) (string, error) {
+	for _, key := range holderKeys {
+		thumb, err := jwkThumbprint(key)
+		if err != nil {
+			return "", fmt.Errorf("computing subject id: %w", err)
+		}
+		sum := sha256.Sum256([]byte(thumb))
+		return hex.EncodeToString(sum[:]), nil
+	}
+	return "", fmt.Errorf("no holder-bound credential in this presentation to derive a subject id from")
 }
 
 // mergeClaims flattens per-credential claims into the single map GetResult
@@ -346,18 +377,18 @@ func mergeClaims(perCredential map[string]map[string]any) map[string]any {
 // token, a bad signature, or a holder-key mismatch — fails the whole
 // presentation: this Verifier has no notion of a partially-successful
 // multi-credential response.
-func (s *Service) verifyPresentations(ctx context.Context, v session.VerificationSession, vpTokens map[string]string) (map[string]map[string]any, error) {
+func (s *Service) verifyPresentations(ctx context.Context, v session.VerificationSession, vpTokens map[string]string) (map[string]map[string]any, map[string]jwk.Key, error) {
 	claims := make(map[string]map[string]any, len(v.DCQLQuery.Credentials))
 	holderKeys := make(map[string]jwk.Key, len(v.DCQLQuery.Credentials))
 
 	for _, cred := range v.DCQLQuery.Credentials {
 		vpToken, ok := vpTokens[cred.ID]
 		if !ok || vpToken == "" {
-			return nil, fmt.Errorf("no presentation received for requested credential %q", cred.ID)
+			return nil, nil, fmt.Errorf("no presentation received for requested credential %q", cred.ID)
 		}
 		credClaims, holderKey, err := s.verifyPresentation(ctx, v, cred, vpToken)
 		if err != nil {
-			return nil, fmt.Errorf("credential %q: %w", cred.ID, err)
+			return nil, nil, fmt.Errorf("credential %q: %w", cred.ID, err)
 		}
 		claims[cred.ID] = credClaims
 		if holderKey != nil {
@@ -367,10 +398,10 @@ func (s *Service) verifyPresentations(ctx context.Context, v session.Verificatio
 
 	if len(v.DCQLQuery.Credentials) > 1 {
 		if err := verifyCrossCredentialBinding(holderKeys); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 	}
-	return claims, nil
+	return claims, holderKeys, nil
 }
 
 // verifyPresentation dispatches to the format-specific verifier for one
@@ -584,6 +615,17 @@ func (s *Service) GetResult(sessionID string) (Result, error) {
 	default:
 		return errorResult("pending", "Verification not yet completed"), nil
 	}
+}
+
+// Session returns the raw verification session state for sessionID,
+// unlike GetResult's JSON Result — this is for an in-process caller that
+// needs SubjectID (internal/oidcserver's login bridge, the only such
+// caller today), which Result deliberately never carries: Result is the
+// wallet/frontend-facing poll response, and SubjectID is not something
+// that poll should ever expose (see session.VerificationSession.
+// SubjectID's doc comment on what it is for).
+func (s *Service) Session(sessionID string) (session.VerificationSession, bool) {
+	return s.sessions.FindVerification(sessionID)
 }
 
 // ResultURI is where a same-device wallet is sent after a successful

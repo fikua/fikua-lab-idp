@@ -16,6 +16,7 @@ import (
 	"github.com/fikua/fikua-lab-idp/internal/httpapi"
 	"github.com/fikua/fikua-lab-idp/internal/issuerclient"
 	"github.com/fikua/fikua-lab-idp/internal/oauth2"
+	"github.com/fikua/fikua-lab-idp/internal/oidcserver"
 	"github.com/fikua/fikua-lab-idp/internal/session"
 	"github.com/fikua/fikua-lab-idp/internal/verifier"
 	"github.com/fikua/fikua-lab-idp/internal/webui"
@@ -54,9 +55,20 @@ func main() {
 		log.Fatalf("loading OID4VP Verifier: %v", err)
 	}
 
+	oidcBridge, err := oidcserver.New(cfg.OIDCClientsPath, signingKey, verifierService, cfg.BaseURL)
+	if err != nil {
+		log.Fatalf("loading OpenID Connect bridge: %v", err)
+	}
+
 	mux := http.NewServeMux()
 	httpapi.NewHandler(cfg.BaseURL, signingKey, authzService, issuer, verifierService).Routes(mux)
 	webui.NewHandler(staticFS, cfg.BasePath).Routes(mux)
+	if oidcBridge != nil {
+		log.Printf("OpenID Connect bridge ready at %s (clients: %s)", oidcserver.BasePath, cfg.OIDCClientsPath)
+		mux.HandleFunc("GET "+oidcserver.LoginPath, oidcBridge.Login.ServeHTTP)
+		mux.HandleFunc("GET "+oidcserver.LoginPath+"/poll", oidcBridge.Login.PollHandler)
+		mux.Handle(oidcserver.BasePath+"/", http.StripPrefix(oidcserver.BasePath, oidcBridge.Provider))
+	}
 
 	log.Printf("fikua-lab-idp listening on %s (issuing access tokens for %s)", cfg.Addr, cfg.CredentialIssuerURL)
 	if err := http.ListenAndServe(cfg.Addr, mux); err != nil {
