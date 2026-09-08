@@ -1,19 +1,12 @@
 package httpapi_test
 
 import (
-	"crypto/ecdsa"
-	"crypto/elliptic"
-	"crypto/rand"
-	"crypto/x509"
-	"crypto/x509/pkix"
 	"encoding/json"
-	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strings"
 	"testing"
-	"time"
 
 	fikuacrypto "github.com/fikua/fikua-lab-idp/internal/crypto"
 	"github.com/fikua/fikua-lab-idp/internal/httpapi"
@@ -21,35 +14,6 @@ import (
 	"github.com/fikua/fikua-lab-idp/internal/session"
 	"github.com/fikua/fikua-lab-idp/internal/verifier"
 )
-
-// newTestRequestSigningKey builds a *fikuacrypto.RequestSigningKey backed
-// by a fresh in-memory ECDSA P-256 key and a self-signed leaf certificate —
-// this Verifier's Algorithm() is fixed at ES256 (ECDSA/P-256/SHA-256), so
-// this is the only key shape it accepts. Stands in for the DSS-issued key
-// every real deployment uses (see fikuacrypto.RequestSigningKey's own doc
-// comment on why there is no local-PEM alternative in production).
-func newTestRequestSigningKey(t *testing.T) *fikuacrypto.RequestSigningKey {
-	t.Helper()
-	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
-	template := &x509.Certificate{
-		SerialNumber: big.NewInt(1),
-		Subject:      pkix.Name{CommonName: "test-verifier"},
-		NotBefore:    time.Now().Add(-time.Hour),
-		NotAfter:     time.Now().Add(time.Hour),
-	}
-	der, err := x509.CreateCertificate(rand.Reader, template, template, &priv.PublicKey, priv)
-	if err != nil {
-		t.Fatal(err)
-	}
-	key, err := fikuacrypto.NewRequestSigningKey(priv, [][]byte{der})
-	if err != nil {
-		t.Fatal(err)
-	}
-	return key
-}
 
 // newTestServerWithVerifier is newTestServer's counterpart with a real
 // OID4VP Verifier wired in (direct_post response mode — no JWE round
@@ -59,8 +23,8 @@ func newTestServerWithVerifier(t *testing.T) *httptest.Server {
 	issuerSrv := newStubIssuerServer(t, true)
 	issuer := issuerclient.New(issuerSrv.URL)
 	sessions := session.NewStore()
-	signingKey := newTestSigningKey(t)
-	verifierService := verifier.NewService(testBaseURL, newTestRequestSigningKey(t), sessions, verifier.ResponseModeDirectPost)
+	signingKey := fikuacrypto.NewTestSigningKey(t)
+	verifierService := verifier.NewService(testBaseURL, fikuacrypto.NewTestRequestSigningKey(t), sessions, verifier.ResponseModeDirectPost)
 
 	mux := http.NewServeMux()
 	httpapi.NewHandler(testBaseURL, signingKey, nil, issuer, verifierService).Routes(mux)

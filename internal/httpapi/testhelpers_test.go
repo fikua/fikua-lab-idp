@@ -1,19 +1,11 @@
 package httpapi_test
 
 import (
-	"crypto/ecdsa"
-	"crypto/elliptic"
-	"crypto/rand"
-	"crypto/x509"
 	"encoding/json"
-	"encoding/pem"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
 	"testing"
 
-	fikuacrypto "github.com/fikua/fikua-lab-idp/internal/crypto"
 	"github.com/fikua/fikua-lab-idp/internal/issuerclient"
 )
 
@@ -22,34 +14,6 @@ import (
 // host; it only has to match consistently between the handler under test
 // and whatever it signs/checks against (DPoP htu, client_id, etc).
 const testBaseURL = "https://idp.test.fikua.internal"
-
-// newTestSigningKey builds a *fikuacrypto.SigningKey backed by a fresh
-// EC P-256 key written to a temp certs dir — the only way
-// fikuacrypto.LoadFromPEM constructs one (see its own doc comment on why
-// there is no in-memory constructor: production deliberately has no
-// ephemeral-key fallback, so tests go through the same file-loading path
-// rather than a separate code path that could drift from it).
-func newTestSigningKey(t *testing.T) *fikuacrypto.SigningKey {
-	t.Helper()
-	dir := t.TempDir()
-	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
-	der, err := x509.MarshalPKCS8PrivateKey(priv)
-	if err != nil {
-		t.Fatal(err)
-	}
-	pemBytes := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der})
-	if err := os.WriteFile(filepath.Join(dir, "idp-key.pem"), pemBytes, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	key, err := fikuacrypto.LoadFromPEM(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return key
-}
 
 // newStubIssuerServer stands in for the Credential Issuer this AS talks
 // to via internal/issuerclient. found controls FindByIssuerState's

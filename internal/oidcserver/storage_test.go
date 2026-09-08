@@ -1,12 +1,7 @@
 package oidcserver
 
 import (
-	"crypto/ecdsa"
-	"crypto/elliptic"
-	"crypto/rand"
-	"crypto/x509"
 	"encoding/json"
-	"encoding/pem"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -21,30 +16,15 @@ import (
 	"github.com/fikua/fikua-lab-idp/internal/oidcclients"
 )
 
-// testSigningKey builds a throwaway fikuacrypto.SigningKey backed by a
-// fresh in-memory EC key — this test never touches the filesystem-backed
-// LoadFromPEM path, since it only needs a key that satisfies op.SigningKey
-// end to end, not this AS's real production key material.
+// testSigningKey is this package's own name for
+// fikuacrypto.NewTestSigningKey, kept as a thin wrapper so every test
+// file in this package (already written against "testSigningKey")
+// didn't need a rename when the underlying constructor moved to
+// internal/crypto to stop being duplicated per test package (see
+// internal/crypto/testkeys.go's doc comment).
 func testSigningKey(t *testing.T) *fikuacrypto.SigningKey {
 	t.Helper()
-	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		t.Fatalf("generating test key: %v", err)
-	}
-	dir := t.TempDir()
-	der, err := x509.MarshalECPrivateKey(priv)
-	if err != nil {
-		t.Fatalf("marshaling test key: %v", err)
-	}
-	pemBytes := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: der})
-	if err := os.WriteFile(filepath.Join(dir, "idp-key.pem"), pemBytes, 0o600); err != nil {
-		t.Fatalf("writing test key: %v", err)
-	}
-	key, err := fikuacrypto.LoadFromPEM(dir)
-	if err != nil {
-		t.Fatalf("LoadFromPEM: %v", err)
-	}
-	return key
+	return fikuacrypto.NewTestSigningKey(t)
 }
 
 func testRegistry(t *testing.T) *oidcclients.Registry {
