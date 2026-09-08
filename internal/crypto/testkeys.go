@@ -25,6 +25,29 @@ type tHelper interface {
 	Fatal(args ...any)
 }
 
+// mustNoError fails t immediately if err is non-nil — every step in this
+// file's two constructors is one of these, so factoring the check out
+// (rather than repeating `if err != nil { t.Fatal(err) }` at each step)
+// is what keeps NewTestSigningKey and NewTestRequestSigningKey from
+// looking like near-duplicates of each other despite building different
+// key types.
+func mustNoError(t tHelper, err error) {
+	t.Helper()
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+// generateTestECKey generates a fresh EC P-256 key — the one property
+// both constructors below need in common, and the only step that would
+// otherwise be duplicated between them.
+func generateTestECKey(t tHelper) *ecdsa.PrivateKey {
+	t.Helper()
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	mustNoError(t, err)
+	return priv
+}
+
 // NewTestSigningKey builds a *SigningKey backed by a fresh EC P-256 key
 // written to a temp dir — the only way LoadFromPEM constructs one (see
 // its own doc comment on why there is no in-memory constructor:
@@ -35,26 +58,18 @@ type tHelper interface {
 // with no real production key material.
 func NewTestSigningKey(t tHelper) *SigningKey {
 	t.Helper()
-	dir, err := os.MkdirTemp("", "fikua-test-signingkey-*")
-	if err != nil {
-		t.Fatal(err)
-	}
-	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
+	priv := generateTestECKey(t)
+
 	der, err := x509.MarshalPKCS8PrivateKey(priv)
-	if err != nil {
-		t.Fatal(err)
-	}
+	mustNoError(t, err)
 	pemBytes := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der})
-	if err := os.WriteFile(filepath.Join(dir, "idp-key.pem"), pemBytes, 0o600); err != nil {
-		t.Fatal(err)
-	}
+
+	dir, err := os.MkdirTemp("", "fikua-test-signingkey-*")
+	mustNoError(t, err)
+	mustNoError(t, os.WriteFile(filepath.Join(dir, "idp-key.pem"), pemBytes, 0o600))
+
 	key, err := LoadFromPEM(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
+	mustNoError(t, err)
 	return key
 }
 
@@ -68,10 +83,8 @@ func NewTestSigningKey(t tHelper) *SigningKey {
 // need a Verifier request-signing key with no real DSS involved.
 func NewTestRequestSigningKey(t tHelper) *RequestSigningKey {
 	t.Helper()
-	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
+	priv := generateTestECKey(t)
+
 	template := &x509.Certificate{
 		SerialNumber: big.NewInt(1),
 		Subject:      pkix.Name{CommonName: "test-verifier"},
@@ -79,12 +92,9 @@ func NewTestRequestSigningKey(t tHelper) *RequestSigningKey {
 		NotAfter:     time.Now().Add(time.Hour),
 	}
 	der, err := x509.CreateCertificate(rand.Reader, template, template, &priv.PublicKey, priv)
-	if err != nil {
-		t.Fatal(err)
-	}
+	mustNoError(t, err)
+
 	key, err := NewRequestSigningKey(priv, [][]byte{der})
-	if err != nil {
-		t.Fatal(err)
-	}
+	mustNoError(t, err)
 	return key
 }
