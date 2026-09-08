@@ -65,8 +65,22 @@ func failf(format string, args ...any) error {
 // certchain.Validate for why that is conformance-testing behaviour and what
 // closing the gap would take.
 func Verify(presentation, expectedAud, expectedNonce string) (map[string]any, error) {
-	claims, _, err := VerifyWithStatus(presentation, expectedAud, expectedNonce)
-	return claims, err
+	result, err := VerifyWithStatus(presentation, expectedAud, expectedNonce)
+	return result.Claims, err
+}
+
+// Result is one SD-JWT VC presentation's verified content: its disclosed
+// claims, the issuer's own "status" claim (see VerifyWithStatus), and the
+// holder key the KB-JWT was checked against. HolderKey is exposed so a
+// caller presented with more than one credential in the same session (e.g.
+// a PID alongside an attestation whose Rulebook declares
+// `cryptographically_bound_to` it) can compare holder keys across
+// credentials — this package only ever verifies one presentation at a
+// time and has no notion of that cross-credential relationship itself.
+type Result struct {
+	Claims    map[string]any
+	Status    map[string]any
+	HolderKey jwk.Key
 }
 
 // VerifyWithStatus is Verify plus the issuer JWT's own "status" claim
@@ -74,14 +88,16 @@ func Verify(presentation, expectedAud, expectedNonce string) (map[string]any, er
 // {status_list: {idx, uri}}), so a caller can fetch and check the
 // credential's revocation state — HAIP §7 point 2.2.2.2 requires the
 // Verifier do this, not just validate the presentation's signatures.
-// status is nil when the issuer JWT carries no "status" claim at all
+// Result.Status is nil when the issuer JWT carries no "status" claim at all
 // (unusual for this ecosystem's own issuer, but not itself a reason to
 // reject a presentation — an issuer that opts out of revocation is a
-// policy question, not a cryptographic failure).
-func VerifyWithStatus(presentation, expectedAud, expectedNonce string) (claims map[string]any, status map[string]any, err error) {
+// policy question, not a cryptographic failure). Result.HolderKey is
+// always set on success (verifyKeyBinding requires a valid cnf.jwk to
+// return at all).
+func VerifyWithStatus(presentation, expectedAud, expectedNonce string) (Result, error) {
 	parsed, err := parse(presentation)
 	if err != nil {
-		return nil, nil, err
+		return Result{}, err
 	}
 
 	// Read first, verify after: HAIP §7 point 2.2.2.2 requires the
@@ -95,20 +111,21 @@ func VerifyWithStatus(presentation, expectedAud, expectedNonce string) (claims m
 	// network fetch (see statuslistcheck.ParseRef's caller), never trust
 	// decisions about the claims themselves — those still wait for the
 	// signature check below.
-	status = unverifiedStatusClaim(parsed.issuerJWT)
+	status := unverifiedStatusClaim(parsed.issuerJWT)
 
 	issuerClaims, err := verifyIssuerSignature(parsed.issuerJWT)
 	if err != nil {
-		return nil, status, err
+		return Result{Status: status}, err
 	}
 	if err := verifyDisclosureDigests(parsed.disclosures, issuerClaims); err != nil {
-		return nil, status, err
+		return Result{Status: status}, err
 	}
-	if err := verifyKeyBinding(parsed, issuerClaims, presentation, expectedAud, expectedNonce); err != nil {
-		return nil, status, err
+	holderKey, err := verifyKeyBinding(parsed, issuerClaims, presentation, expectedAud, expectedNonce)
+	if err != nil {
+		return Result{Status: status}, err
 	}
 
-	claims = make(map[string]any, len(parsed.disclosures))
+	claims := make(map[string]any, len(parsed.disclosures))
 	for _, d := range parsed.disclosures {
 		claims[d.claimName] = d.claimValue
 	}
@@ -117,7 +134,7 @@ func VerifyWithStatus(presentation, expectedAud, expectedNonce string) (claims m
 	// check just failed to catch a tampered status claim, which the
 	// caller relies on not happening.
 	status, _ = issuerClaims["status"].(map[string]any)
-	return claims, status, nil
+	return Result{Claims: claims, Status: status, HolderKey: holderKey}, nil
 }
 
 // unverifiedStatusClaim reads the "status" claim straight off an issuer
@@ -287,26 +304,26 @@ func verifyDisclosureDigests(disclosures []disclosure, issuerClaims map[string]a
 // replayed at a different Verifier (aud), in a different session (nonce),
 // with disclosures added or removed after the holder signed (sd_hash), or
 // at an arbitrary later time (iat).
-func verifyKeyBinding(parsed presentationParts, issuerClaims map[string]any, presentation, expectedAud, expectedNonce string) error {
+func verifyKeyBinding(parsed presentationParts, issuerClaims map[string]any, presentation, expectedAud, expectedNonce string) (jwk.Key, error) {
 	if parsed.kbJWT == "" {
-		return failf("Key Binding JWT is missing")
+		return nil, failf("Key Binding JWT is missing")
 	}
 
 	cnf, ok := issuerClaims["cnf"].(map[string]any)
 	if !ok {
-		return failf("issuer JWT has no cnf for key binding")
+		return nil, failf("issuer JWT has no cnf for key binding")
 	}
 	cnfJWK, ok := cnf["jwk"].(map[string]any)
 	if !ok {
-		return failf("issuer JWT has no cnf.jwk for key binding")
+		return nil, failf("issuer JWT has no cnf.jwk for key binding")
 	}
 	cnfJSON, err := json.Marshal(cnfJWK)
 	if err != nil {
-		return failf("issuer JWT cnf.jwk is unreadable: %v", err)
+		return nil, failf("issuer JWT cnf.jwk is unreadable: %v", err)
 	}
 	holderKey, err := jwk.ParseKey(cnfJSON)
 	if err != nil {
-		return failf("issuer JWT cnf.jwk is not a valid JWK: %v", err)
+		return nil, failf("issuer JWT cnf.jwk is not a valid JWK: %v", err)
 	}
 
 	// Signature first, claims after: jwt.Parse with WithValidate(false)
@@ -314,34 +331,34 @@ func verifyKeyBinding(parsed presentationParts, issuerClaims map[string]any, pre
 	// done explicitly below so each failure names itself.
 	token, err := jwt.Parse([]byte(parsed.kbJWT), jwt.WithKey(jwa.ES256(), holderKey), jwt.WithValidate(false))
 	if err != nil {
-		return failf("Key Binding JWT signature is invalid")
+		return nil, failf("Key Binding JWT signature is invalid")
 	}
 
 	aud, ok := token.Audience()
 	if !ok || len(aud) == 0 || aud[0] != expectedAud {
-		return failf("KB-JWT aud does not match client_id %q", expectedAud)
+		return nil, failf("KB-JWT aud does not match client_id %q", expectedAud)
 	}
 
 	var nonce string
 	_ = token.Get("nonce", &nonce)
 	if nonce != expectedNonce {
-		return failf("KB-JWT nonce does not match the request nonce")
+		return nil, failf("KB-JWT nonce does not match the request nonce")
 	}
 
 	var sdHash string
 	_ = token.Get("sd_hash", &sdHash)
 	if sdHash != computeSdHash(presentation) {
-		return failf("KB-JWT sd_hash does not match the presentation")
+		return nil, failf("KB-JWT sd_hash does not match the presentation")
 	}
 
 	iat, ok := token.IssuedAt()
 	if !ok {
-		return failf("KB-JWT is missing iat")
+		return nil, failf("KB-JWT is missing iat")
 	}
 	if skew := time.Since(iat); skew > kbIATSkew || skew < -kbIATSkew {
-		return failf("KB-JWT iat is outside the acceptable window (skew %s)", skew.Truncate(time.Second))
+		return nil, failf("KB-JWT iat is outside the acceptable window (skew %s)", skew.Truncate(time.Second))
 	}
-	return nil
+	return holderKey, nil
 }
 
 // computeSdHash is base64url(SHA-256(everything up to and including the

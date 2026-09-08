@@ -101,9 +101,13 @@ type VerificationSession struct {
 	// different requests' client_metadata.
 	EncryptionKey *fikuacrypto.ResponseEncryptionKey
 	// Status is one of: pending, request_sent, verified, failed.
-	Status         string
-	VPToken        string
-	VerifiedClaims map[string]any
+	Status string
+	// VPTokens and VerifiedClaims are keyed by DCQLCredentialQuery.ID, one
+	// entry per credential requested in DCQLQuery.Credentials. A
+	// single-credential session (the common case) still has exactly one
+	// key here — there is no separate flat-field path for it.
+	VPTokens       map[string]string
+	VerifiedClaims map[string]map[string]any
 	Error          string
 	CreatedAt      time.Time
 }
@@ -115,6 +119,21 @@ type VerificationSession struct {
 // session when the response arrives.
 type DCQLQuery struct {
 	Credentials []DCQLCredentialQuery `json:"credentials"`
+	// CredentialSets names which combinations of the above Credentials IDs
+	// must be satisfied together (OID4VP §6.3.1). Omitted for a
+	// single-credential query, where it would say nothing a bare
+	// Credentials entry doesn't already require on its own.
+	CredentialSets []DCQLCredentialSet `json:"credential_sets,omitempty"`
+}
+
+// DCQLCredentialSet is one entry of DCQLQuery.CredentialSets: Options is a
+// list of alternative ID combinations, any one of which satisfies this set.
+// This Verifier only ever emits a single option per set — HAIP is a fixed
+// profile with no "either X or Y" credential choices — but Options stays a
+// [][]string rather than []string to match the spec shape exactly, since a
+// wallet's DCQL parser expects it.
+type DCQLCredentialSet struct {
+	Options [][]string `json:"options"`
 }
 
 // DCQLCredentialQuery is one credential's query (OID4VP §6.1).
@@ -280,13 +299,16 @@ func (s *Store) UpdateVerificationStatus(sessionID, status string) {
 }
 
 // UpdateVerificationResult records the outcome of a presentation against
-// its session — status "verified" with claims, or "failed" with the reason.
-func (s *Store) UpdateVerificationResult(sessionID, status, vpToken string, claims map[string]any, verifyErr string) {
+// its session — status "verified" with claims per credential-query ID, or
+// "failed" with the reason. vpTokens and claims are both keyed by
+// DCQLCredentialQuery.ID; a failed verification may still pass a partial
+// vpTokens (whatever was received) for diagnostics, with claims nil.
+func (s *Store) UpdateVerificationResult(sessionID, status string, vpTokens map[string]string, claims map[string]map[string]any, verifyErr string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if v, ok := s.findVerificationPointerLocked(sessionID); ok {
 		v.Status = status
-		v.VPToken = vpToken
+		v.VPTokens = vpTokens
 		v.VerifiedClaims = claims
 		v.Error = verifyErr
 	}

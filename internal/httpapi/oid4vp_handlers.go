@@ -8,13 +8,26 @@ import (
 	"github.com/fikua/fikua-lab-idp/internal/verifier"
 )
 
-// createSessionRequest is POST /oid4vp/v1/session's body — what the
-// verification frontend asks for. Every field is optional; the defaults
-// applied below are the PID request this ecosystem exists to make.
-type createSessionRequest struct {
+// credentialRequest is one entry of createSessionRequest.Credentials.
+type credentialRequest struct {
+	ID             string   `json:"id"`
 	CredentialType string   `json:"credential_type"`
 	Claims         []string `json:"claims"`
 	Format         string   `json:"format"`
+}
+
+// createSessionRequest is POST /oid4vp/v1/session's body — what the
+// verification frontend asks for. Two shapes are accepted: Credentials, a
+// list for a multi-credential session (e.g. a PID plus a bound
+// attestation), or the flat CredentialType/Claims/Format fields for a
+// single-credential session — kept for existing callers, and simply
+// wrapped into a one-element Credentials list of its own. When neither is
+// given, the PID request this ecosystem exists to make by default applies.
+type createSessionRequest struct {
+	Credentials    []credentialRequest `json:"credentials"`
+	CredentialType string              `json:"credential_type"`
+	Claims         []string            `json:"claims"`
+	Format         string              `json:"format"`
 }
 
 // Defaults for a session request that names nothing. Kept as constants so
@@ -23,6 +36,13 @@ type createSessionRequest struct {
 const defaultCredentialType = "eu.europa.ec.eudi.pid.1"
 
 var defaultClaims = []string{"given_name", "family_name", "birth_date"}
+
+// defaultCredentialID is the DCQL credential-query ID used for a
+// single-credential session — matches the fixed ID this Verifier always
+// used before it could request more than one credential, so an existing
+// caller's vp_token handling (keyed by this ID, or sent as a bare string)
+// keeps working unchanged.
+const defaultCredentialID = "requested_credential"
 
 // oid4vpCreateSession implements POST /oid4vp/v1/session: builds a
 // verification session and returns the request_uri a wallet is pointed at,
@@ -36,17 +56,36 @@ func (h *Handler) oid4vpCreateSession(w http.ResponseWriter, r *http.Request) {
 	if r.Body != nil {
 		_ = json.NewDecoder(r.Body).Decode(&req)
 	}
-	if req.CredentialType == "" {
-		req.CredentialType = defaultCredentialType
+
+	credentials := req.Credentials
+	if len(credentials) == 0 {
+		flat := credentialRequest{
+			ID:             defaultCredentialID,
+			CredentialType: req.CredentialType,
+			Claims:         req.Claims,
+			Format:         req.Format,
+		}
+		if flat.CredentialType == "" {
+			flat.CredentialType = defaultCredentialType
+		}
+		if len(flat.Claims) == 0 {
+			flat.Claims = defaultClaims
+		}
+		credentials = []credentialRequest{flat}
 	}
-	if len(req.Claims) == 0 {
-		req.Claims = defaultClaims
+
+	verifierCredentials := make([]verifier.CredentialRequest, 0, len(credentials))
+	for _, c := range credentials {
+		verifierCredentials = append(verifierCredentials, verifier.CredentialRequest{
+			ID:             c.ID,
+			CredentialType: c.CredentialType,
+			Claims:         c.Claims,
+			Format:         c.Format,
+		})
 	}
 
 	result, err := h.verifier.CreateSession(verifier.CreateSessionRequest{
-		CredentialType: req.CredentialType,
-		Claims:         req.Claims,
-		Format:         req.Format,
+		Credentials: verifierCredentials,
 	})
 	if err != nil {
 		writeOAuthError(w, oauth2.BadRequest(oauth2.InvalidRequest, "Failed to create verification session: "+err.Error()))

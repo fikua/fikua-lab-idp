@@ -15,12 +15,15 @@ package verifier
 
 import (
 	"context"
+	"crypto"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/lestrrat-go/jwx/v3/jwk"
 
 	fikuacrypto "github.com/fikua/fikua-lab-idp/internal/crypto"
 	"github.com/fikua/fikua-lab-idp/internal/mdocverify"
@@ -99,13 +102,26 @@ func NewService(baseURL string, signingKey *fikuacrypto.RequestSigningKey, sessi
 	}
 }
 
-// CreateSessionRequest is what the frontend asks for: a credential type
-// (the SD-JWT VC `vct` or the mdoc docType), the claims to request, and
-// which format to request them in.
-type CreateSessionRequest struct {
+// CredentialRequest is one credential the frontend wants requested: its own
+// DCQL credential-query ID, a credential type (the SD-JWT VC `vct` or the
+// mdoc docType), the claims to request, and which format to request them
+// in.
+type CredentialRequest struct {
+	ID             string
 	CredentialType string
 	Claims         []string
 	Format         string
+}
+
+// CreateSessionRequest is what the frontend asks for: one or more
+// credentials to request together in a single presentation. A
+// single-element Credentials is the common case (e.g. a bare PID request);
+// more than one means every credential listed is required in the same
+// presentation — this Verifier has no notion of alternative/optional
+// credential choices, so there is exactly one DCQLCredentialSet option
+// naming all of them (see buildDCQLQuery).
+type CreateSessionRequest struct {
+	Credentials []CredentialRequest
 }
 
 // CreateSessionResult is what the frontend gets back — everything it needs
@@ -121,13 +137,15 @@ type CreateSessionResult struct {
 // DCQL query for the requested claims, and the signed Authorization Request
 // the wallet will fetch from RequestURI.
 func (s *Service) CreateSession(req CreateSessionRequest) (CreateSessionResult, error) {
-	mdoc := isMdocFormat(req.Format)
+	if len(req.Credentials) == 0 {
+		return CreateSessionResult{}, fmt.Errorf("verifier: CreateSession requires at least one credential")
+	}
 
 	sessionID := session.RandomToken(16)
 	state := session.RandomToken(32)
 	nonce := session.RandomToken(32)
 
-	dcql := buildDCQLQuery(mdoc, req.CredentialType, req.Claims)
+	dcql := buildDCQLQuery(req.Credentials)
 	clientID, err := s.clientID()
 	if err != nil {
 		return CreateSessionResult{}, err
@@ -142,7 +160,7 @@ func (s *Service) CreateSession(req CreateSessionRequest) (CreateSessionResult, 
 			return CreateSessionResult{}, err
 		}
 	}
-	clientMetadata, err := s.buildClientMetadata(mdoc, encryptionKey)
+	clientMetadata, err := s.buildClientMetadata(dcql, encryptionKey)
 	if err != nil {
 		return CreateSessionResult{}, err
 	}
@@ -247,7 +265,8 @@ func errorResult(code, description string) Result {
 // malformed *request* — no state, no vp_token — is a plain protocol error
 // that never touches a session.
 func (s *Service) HandleResponse(ctx context.Context, req ResponseRequest) (Result, session.VerificationSession, error) {
-	vpToken, state := req.VPToken, req.State
+	var rawVPToken any = req.VPToken
+	state := req.State
 	var v session.VerificationSession
 
 	if req.Response != "" {
@@ -271,8 +290,8 @@ func (s *Service) HandleResponse(ctx context.Context, req ResponseRequest) (Resu
 		if err != nil {
 			return errorResult("invalid_request", err.Error()), session.VerificationSession{}, nil
 		}
-		vpToken, state = decrypted.vpToken, decrypted.state
-		if state == "" || vpToken == "" {
+		rawVPToken, state = decrypted.vpToken, decrypted.state
+		if state == "" || allVPTokens(parseVPToken(rawVPToken), v.DCQLQuery) == nil {
 			return errorResult("invalid_request", "Decrypted response is missing state or vp_token"), session.VerificationSession{}, nil
 		}
 		if state != v.State {
@@ -282,7 +301,7 @@ func (s *Service) HandleResponse(ctx context.Context, req ResponseRequest) (Resu
 		if state == "" {
 			return Result{}, session.VerificationSession{}, oauth2.BadRequest(oauth2.InvalidRequest, "Missing state parameter")
 		}
-		if vpToken == "" {
+		if req.VPToken == "" {
 			return Result{}, session.VerificationSession{}, oauth2.BadRequest(oauth2.InvalidRequest, "Missing vp_token or response parameter")
 		}
 		found, ok := s.sessions.FindVerificationByState(state)
@@ -292,27 +311,82 @@ func (s *Service) HandleResponse(ctx context.Context, req ResponseRequest) (Resu
 		v = found
 	}
 
-	claims, err := s.verifyPresentation(ctx, v, vpToken)
+	vpTokens := allVPTokens(parseVPToken(rawVPToken), v.DCQLQuery)
+	claims, err := s.verifyPresentations(ctx, v, vpTokens)
 	if err != nil {
-		s.sessions.UpdateVerificationResult(v.SessionID, "failed", vpToken, nil, err.Error())
+		s.sessions.UpdateVerificationResult(v.SessionID, "failed", vpTokens, nil, err.Error())
 		return errorResult("invalid_presentation", err.Error()), v, nil
 	}
 
-	s.sessions.UpdateVerificationResult(v.SessionID, "verified", vpToken, claims, "")
-	return successResult(claims), v, nil
+	s.sessions.UpdateVerificationResult(v.SessionID, "verified", vpTokens, claims, "")
+	return successResult(mergeClaims(claims)), v, nil
 }
 
-// verifyPresentation dispatches to the format-specific verifier, then —
-// for a credential that carries one — checks the presented credential's
-// own Token Status List reference. HAIP §7 point 2.2.2.2 requires this
-// fetch actually happen, not just that the presentation's signatures
-// check out; a revoked credential's signature is still valid, that's the
-// whole reason a separate status check exists. The format comes off the
-// session's own stored DCQL query, never off the response: a wallet must
-// answer the question that was asked, not pick the format whose
-// verification it prefers.
-func (s *Service) verifyPresentation(ctx context.Context, v session.VerificationSession, vpToken string) (map[string]any, error) {
-	if sessionFormat(v) == FormatMsoMdoc {
+// mergeClaims flattens per-credential claims into the single map GetResult
+// and this response have always returned. A single-credential session's
+// result is unchanged from before this package supported more than one;
+// callers that care about *which* credential a claim came from should read
+// VerificationSession.VerifiedClaims/GetResultDetailed instead once that
+// distinction matters to them — nothing does yet.
+func mergeClaims(perCredential map[string]map[string]any) map[string]any {
+	merged := map[string]any{}
+	for _, claims := range perCredential {
+		for k, v := range claims {
+			merged[k] = v
+		}
+	}
+	return merged
+}
+
+// verifyPresentations verifies every credential in the session's DCQL
+// query against its matching entry in vpTokens (keyed by
+// DCQLCredentialQuery.ID — see allVPTokens), then, when more than one
+// credential was requested, checks they were all presented by the same
+// holder (verifyCrossCredentialBinding). A single failure — a missing
+// token, a bad signature, or a holder-key mismatch — fails the whole
+// presentation: this Verifier has no notion of a partially-successful
+// multi-credential response.
+func (s *Service) verifyPresentations(ctx context.Context, v session.VerificationSession, vpTokens map[string]string) (map[string]map[string]any, error) {
+	claims := make(map[string]map[string]any, len(v.DCQLQuery.Credentials))
+	holderKeys := make(map[string]jwk.Key, len(v.DCQLQuery.Credentials))
+
+	for _, cred := range v.DCQLQuery.Credentials {
+		vpToken, ok := vpTokens[cred.ID]
+		if !ok || vpToken == "" {
+			return nil, fmt.Errorf("no presentation received for requested credential %q", cred.ID)
+		}
+		credClaims, holderKey, err := s.verifyPresentation(ctx, v, cred, vpToken)
+		if err != nil {
+			return nil, fmt.Errorf("credential %q: %w", cred.ID, err)
+		}
+		claims[cred.ID] = credClaims
+		if holderKey != nil {
+			holderKeys[cred.ID] = holderKey
+		}
+	}
+
+	if len(v.DCQLQuery.Credentials) > 1 {
+		if err := verifyCrossCredentialBinding(holderKeys); err != nil {
+			return nil, err
+		}
+	}
+	return claims, nil
+}
+
+// verifyPresentation dispatches to the format-specific verifier for one
+// credential, then — for a credential that carries one — checks the
+// presented credential's own Token Status List reference. HAIP §7 point
+// 2.2.2.2 requires this fetch actually happen, not just that the
+// presentation's signatures check out; a revoked credential's signature is
+// still valid, that's the whole reason a separate status check exists. The
+// format and docType come off cred, the session's own stored DCQL query
+// for this credential ID, never off the response: a wallet must answer the
+// question that was asked, not pick the format whose verification it
+// prefers. holderKey is nil for mdoc (this Verifier does not yet extract a
+// comparable per-credential key from an mdoc DeviceResponse — cross-format
+// binding is future work, see verifyCrossCredentialBinding's doc comment).
+func (s *Service) verifyPresentation(ctx context.Context, v session.VerificationSession, cred session.DCQLCredentialQuery, vpToken string) (map[string]any, jwk.Key, error) {
+	if cred.Format == FormatMsoMdoc {
 		var thumbprint []byte
 		if v.ResponseMode == ResponseModeDirectPostJWT {
 			// OID4VP §B.2.6: the handover binds to the response-encryption
@@ -321,18 +395,23 @@ func (s *Service) verifyPresentation(ctx context.Context, v session.Verification
 			var err error
 			thumbprint, err = v.EncryptionKey.ThumbprintSHA256()
 			if err != nil {
-				return nil, err
+				return nil, nil, err
 			}
+		}
+		docType := ""
+		if cred.Meta != nil {
+			docType = cred.Meta.DoctypeValue
 		}
 		// mdoc status-list checking is not yet wired up here — this
 		// Verifier's OIDF coverage so far only exercises the SD-JWT VC
 		// path (docs/issuer-trust-validation.md tracks the analogous
 		// issuer-trust gap; this is the same kind of "ported the
 		// crypto, not yet every HAIP consequence of it" gap for mdoc).
-		return mdocverify.Verify(vpToken, sessionDocType(v), v.ClientID, v.Nonce, thumbprint, v.ResponseURI, nil)
+		claims, err := mdocverify.Verify(vpToken, docType, v.ClientID, v.Nonce, thumbprint, v.ResponseURI, nil)
+		return claims, nil, err
 	}
 
-	claims, status, verifyErr := sdjwtverify.VerifyWithStatus(vpToken, v.ClientID, v.Nonce)
+	result, verifyErr := sdjwtverify.VerifyWithStatus(vpToken, v.ClientID, v.Nonce)
 	// The status list fetch runs even when verifyErr is set: HAIP §7 point
 	// 2.2.2.2 requires the Verifier check revocation status regardless of
 	// whether the presentation is otherwise accepted (confirmed against
@@ -340,20 +419,70 @@ func (s *Service) verifyPresentation(ctx context.Context, v session.Verification
 	// tests, which all still require the fetch). status itself is read
 	// off the issuer JWT's payload without waiting on its signature — see
 	// sdjwtverify.unverifiedStatusClaim's doc comment on why that's safe.
-	if ref, ok := statuslistcheck.ParseRef(status); ok {
+	if ref, ok := statuslistcheck.ParseRef(result.Status); ok {
 		if err := statuslistcheck.CheckValid(ctx, ref); err != nil && verifyErr == nil {
 			verifyErr = err
 		}
 	}
 	if verifyErr != nil {
-		return nil, verifyErr
+		return nil, nil, verifyErr
 	}
-	return claims, nil
+	return result.Claims, result.HolderKey, nil
 }
 
-// decryptedResponse is the plaintext of a direct_post.jwt JWE.
+// verifyCrossCredentialBinding requires every credential in a
+// multi-credential presentation to have been presented by the same holder
+// — the check that gives meaning to a Rulebook's
+// `cryptographically_bound_to` claim (e.g. the Barcelona padró attestation
+// declaring it presupposes a verified PID): without it, a wallet could mix
+// a genuine padró attestation with a different person's PID and this
+// Verifier would accept both as individually valid. Compared by JWK
+// thumbprint (RFC 7638) rather than raw key material, so any two
+// equivalent encodings of the same key still match.
+//
+// Only covers SD-JWT VC credentials today — an mdoc presentation's
+// holderKeys entry is absent (see verifyPresentation), so a
+// multi-credential set mixing formats cannot have its binding checked yet.
+// That gap is acceptable for now: the Barcelona padró attestation this was
+// built for is dc+sd-jwt-only (see fikua-lab-attestation-registry's
+// padro-barcelona.json), so every credential this function is actually
+// called with today has a holder key. Revisit if a mixed-format
+// combination is ever requested.
+func verifyCrossCredentialBinding(holderKeys map[string]jwk.Key) error {
+	var firstID, firstThumb string
+	for id, key := range holderKeys {
+		thumb, err := jwkThumbprint(key)
+		if err != nil {
+			return fmt.Errorf("credential %q: computing holder key thumbprint: %w", id, err)
+		}
+		if firstThumb == "" {
+			firstID, firstThumb = id, thumb
+			continue
+		}
+		if thumb != firstThumb {
+			return fmt.Errorf("credential %q is not bound to the same holder key as credential %q", id, firstID)
+		}
+	}
+	return nil
+}
+
+// jwkThumbprint returns a JWK's RFC 7638 thumbprint as a base64url string,
+// suitable for comparing two keys for equality regardless of their exact
+// JSON encoding.
+func jwkThumbprint(key jwk.Key) (string, error) {
+	thumb, err := key.Thumbprint(crypto.SHA256)
+	if err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(thumb), nil
+}
+
+// decryptedResponse is the plaintext of a direct_post.jwt JWE. vpToken is
+// left as decoded JSON (string, or object keyed by DCQL credential id per
+// OID4VP §8.1) rather than flattened here — allVPTokens is the one place
+// that shape gets resolved, shared with the plain direct_post path.
 type decryptedResponse struct {
-	vpToken string
+	vpToken any
 	state   string
 }
 
@@ -369,27 +498,70 @@ func decryptResponse(key *fikuacrypto.ResponseEncryptionKey, jwe string) (decryp
 	if err := json.Unmarshal(plaintext, &payload); err != nil {
 		return decryptedResponse{}, fmt.Errorf("decrypted response is not JSON: %w", err)
 	}
-	return decryptedResponse{vpToken: firstVPToken(payload.VPToken), state: payload.State}, nil
+	return decryptedResponse{vpToken: payload.VPToken, state: payload.State}, nil
 }
 
-// firstVPToken pulls a single presentation out of the several shapes
-// vp_token takes. OID4VP §8.1 makes it an object keyed by DCQL credential
-// id whose values are arrays; older wallets send a bare string. This
-// Verifier only ever asks for one credential, so the first value found is
-// the answer.
-func firstVPToken(raw any) string {
+// parseVPToken normalizes a vp_token into the shape allVPTokens expects.
+// The plain direct_post path hands this a raw form-field string, which is
+// either a single presentation on its own (single-credential, no object
+// wrapper) or a JSON-encoded {credential_id: [...]} object (OID4VP §8.1,
+// multi-credential) — form fields have no native JSON type, so a
+// multi-credential wallet must serialize it. The direct_post.jwt path
+// hands this an already-decoded any (string or map, see decryptResponse)
+// and gets it back unchanged.
+func parseVPToken(raw any) any {
+	s, ok := raw.(string)
+	if !ok {
+		return raw
+	}
+	var decoded any
+	if err := json.Unmarshal([]byte(s), &decoded); err == nil {
+		if _, isObject := decoded.(map[string]any); isObject {
+			return decoded
+		}
+	}
+	return s
+}
+
+// allVPTokens resolves the several shapes vp_token takes into a map keyed
+// by DCQL credential-query ID. OID4VP §8.1 makes it an object keyed by
+// DCQL credential id whose values are arrays when more than one credential
+// was requested (or, per some wallets, even for exactly one); a bare
+// string is a single-credential response from a wallet that skips the
+// object wrapper entirely. When raw is a bare string, it is attributed to
+// query.Credentials[0].ID — correct only for a single-credential session,
+// which is the only shape a bare-string wallet response can mean anyway
+// (a wallet has no way to name a credential ID without the object form).
+func allVPTokens(raw any, query session.DCQLQuery) map[string]string {
+	switch v := raw.(type) {
+	case string:
+		if v == "" || len(query.Credentials) == 0 {
+			return nil
+		}
+		return map[string]string{query.Credentials[0].ID: v}
+	case map[string]any:
+		tokens := make(map[string]string, len(v))
+		for id, value := range v {
+			if token := firstOf(value); token != "" {
+				tokens[id] = token
+			}
+		}
+		return tokens
+	}
+	return nil
+}
+
+// firstOf unwraps a vp_token entry's value — a bare string, or (per OID4VP
+// §8.1) a one-or-more-element array of strings, of which only the first is
+// used since this Verifier never requests more than one instance of the
+// same credential.
+func firstOf(raw any) string {
 	switch v := raw.(type) {
 	case string:
 		return v
 	case []any:
 		if len(v) > 0 {
-			return firstVPToken(v[0])
-		}
-	case map[string]any:
-		for _, value := range v {
-			if token := firstVPToken(value); token != "" {
-				return token
-			}
+			return firstOf(v[0])
 		}
 	}
 	return ""
@@ -406,11 +578,7 @@ func (s *Service) GetResult(sessionID string) (Result, error) {
 	}
 	switch v.Status {
 	case "verified":
-		claims := v.VerifiedClaims
-		if claims == nil {
-			claims = map[string]any{}
-		}
-		return successResult(claims), nil
+		return successResult(mergeClaims(v.VerifiedClaims)), nil
 	case "failed":
 		return errorResult("verification_failed", v.Error), nil
 	default:
@@ -454,20 +622,25 @@ func (s *Service) certHash() (string, error) {
 
 // buildClientMetadata assembles the client_metadata carried in the Request
 // Object. vp_formats_supported is always present (OID4VP §5.1 requires it),
-// and an encrypted response mode adds encryptionKey's public JWK and the
-// content-encryption methods HAIP §5 requires be advertised. encryptionKey
-// is this session's own — see CreateSession — never nil when the Service's
-// responseMode is direct_post.jwt.
-func (s *Service) buildClientMetadata(mdoc bool, encryptionKey *fikuacrypto.ResponseEncryptionKey) (map[string]any, error) {
+// listing every format actually requested across dcql's credentials (a
+// mixed SD-JWT VC + mso_mdoc session advertises both). An encrypted
+// response mode adds encryptionKey's public JWK and the content-encryption
+// methods HAIP §5 requires be advertised. encryptionKey is this session's
+// own — see CreateSession — never nil when the Service's responseMode is
+// direct_post.jwt.
+func (s *Service) buildClientMetadata(dcql session.DCQLQuery, encryptionKey *fikuacrypto.ResponseEncryptionKey) (map[string]any, error) {
 	vpFormats := map[string]any{}
-	if mdoc {
-		// mso_mdoc advertises COSE algorithm identifiers, where ES256 is -7
-		// (RFC 9053 §2.1) — not the JOSE "ES256" string.
-		vpFormats[FormatMsoMdoc] = map[string]any{"alg": []int{-7}}
-	} else {
-		vpFormats[FormatSDJWTVC] = map[string]any{
-			"sd-jwt_alg_values": []string{"ES256"},
-			"kb-jwt_alg_values": []string{"ES256"},
+	for _, cred := range dcql.Credentials {
+		switch cred.Format {
+		case FormatMsoMdoc:
+			// mso_mdoc advertises COSE algorithm identifiers, where ES256 is
+			// -7 (RFC 9053 §2.1) — not the JOSE "ES256" string.
+			vpFormats[FormatMsoMdoc] = map[string]any{"alg": []int{-7}}
+		case FormatSDJWTVC:
+			vpFormats[FormatSDJWTVC] = map[string]any{
+				"sd-jwt_alg_values": []string{"ES256"},
+				"kb-jwt_alg_values": []string{"ES256"},
+			}
 		}
 	}
 
@@ -484,30 +657,50 @@ func (s *Service) buildClientMetadata(mdoc bool, encryptionKey *fikuacrypto.Resp
 	return metadata, nil
 }
 
-// buildDCQLQuery builds the DCQL query for one credential. SD-JWT VC
-// filters on vct_values with single-segment claim paths; mso_mdoc filters
-// on a single doctype_value with two-segment [namespace, element] paths,
-// where the PID mdoc's namespace is its docType.
-func buildDCQLQuery(mdoc bool, credentialType string, requestedClaims []string) session.DCQLQuery {
-	claims := make([]session.DCQLClaimQuery, 0, len(requestedClaims))
-	query := session.DCQLCredentialQuery{ID: "requested_credential"}
+// buildDCQLQuery builds the DCQL query for one or more credentials, one
+// session.DCQLCredentialQuery per CredentialRequest, keyed by its own ID.
+// SD-JWT VC filters on vct_values with single-segment claim paths; mso_mdoc
+// filters on a single doctype_value with two-segment [namespace, element]
+// paths, where the PID mdoc's namespace is its docType.
+//
+// More than one credential adds a single CredentialSets entry naming every
+// requested ID as the one option — this Verifier always requires every
+// credential it asks for, it never offers a wallet a choice between
+// alternatives, so one all-of option is the whole of what needs saying (see
+// CreateSessionRequest's doc comment).
+func buildDCQLQuery(requests []CredentialRequest) session.DCQLQuery {
+	credentials := make([]session.DCQLCredentialQuery, 0, len(requests))
+	ids := make([]string, 0, len(requests))
 
-	if mdoc {
-		for _, name := range requestedClaims {
-			claims = append(claims, session.DCQLClaimQuery{Path: []string{credentialType, name}})
+	for _, req := range requests {
+		mdoc := isMdocFormat(req.Format)
+		claims := make([]session.DCQLClaimQuery, 0, len(req.Claims))
+		query := session.DCQLCredentialQuery{ID: req.ID}
+
+		if mdoc {
+			for _, name := range req.Claims {
+				claims = append(claims, session.DCQLClaimQuery{Path: []string{req.CredentialType, name}})
+			}
+			query.Format = FormatMsoMdoc
+			query.Meta = &session.DCQLMeta{DoctypeValue: req.CredentialType}
+		} else {
+			for _, name := range req.Claims {
+				claims = append(claims, session.DCQLClaimQuery{Path: []string{name}})
+			}
+			query.Format = FormatSDJWTVC
+			query.Meta = &session.DCQLMeta{VCTValues: []string{req.CredentialType}}
 		}
-		query.Format = FormatMsoMdoc
-		query.Meta = &session.DCQLMeta{DoctypeValue: credentialType}
-	} else {
-		for _, name := range requestedClaims {
-			claims = append(claims, session.DCQLClaimQuery{Path: []string{name}})
-		}
-		query.Format = FormatSDJWTVC
-		query.Meta = &session.DCQLMeta{VCTValues: []string{credentialType}}
+		query.Claims = claims
+
+		credentials = append(credentials, query)
+		ids = append(ids, req.ID)
 	}
-	query.Claims = claims
 
-	return session.DCQLQuery{Credentials: []session.DCQLCredentialQuery{query}}
+	dcql := session.DCQLQuery{Credentials: credentials}
+	if len(requests) > 1 {
+		dcql.CredentialSets = []session.DCQLCredentialSet{{Options: [][]string{ids}}}
+	}
+	return dcql
 }
 
 // isMdocFormat maps the frontend's requested format onto this Verifier's
@@ -522,22 +715,4 @@ func isMdocFormat(format string) bool {
 	default:
 		return false
 	}
-}
-
-// sessionFormat reads the credential format back off the session's own
-// stored DCQL query, which is where it was fixed at creation time.
-func sessionFormat(v session.VerificationSession) string {
-	if len(v.DCQLQuery.Credentials) == 0 {
-		return FormatSDJWTVC
-	}
-	return v.DCQLQuery.Credentials[0].Format
-}
-
-// sessionDocType recovers the requested mdoc docType from the session's
-// DCQL query, so the presented document can be checked against it.
-func sessionDocType(v session.VerificationSession) string {
-	if len(v.DCQLQuery.Credentials) == 0 || v.DCQLQuery.Credentials[0].Meta == nil {
-		return ""
-	}
-	return v.DCQLQuery.Credentials[0].Meta.DoctypeValue
 }
