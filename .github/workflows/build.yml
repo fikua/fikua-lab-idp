@@ -45,6 +45,19 @@ jobs:
         with:
           fetch-depth: 0  # Shallow clones should be disabled for a better relevancy of analysis
 
+      - name: Set up Go
+        uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5  # v5.5.0
+        with:
+          go-version: '1.26'
+
+      # sonar-project.properties points sonar.go.coverage.reportPaths at
+      # this file — without it, SonarCloud has no coverage data at all
+      # (not "coverage is low", literally none reported) and the Quality
+      # Gate's new_coverage condition fails on every push regardless of
+      # how well-tested the new code actually is.
+      - name: go test with coverage
+        run: go test -coverprofile=coverage.out ./...
+
       - name: SonarQube Scan
         uses: SonarSource/sonarqube-scan-action@7006c4492b2e0ee0f816d36501671557c97f5995  # v8.1.0
         env:
