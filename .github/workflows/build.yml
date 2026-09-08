@@ -55,8 +55,16 @@ jobs:
       # (not "coverage is low", literally none reported) and the Quality
       # Gate's new_coverage condition fails on every push regardless of
       # how well-tested the new code actually is.
+      #
+      # -coverpkg=./... matters here specifically: several packages (e.g.
+      # internal/sdjwtverify) are only ever exercised indirectly, from
+      # internal/verifier's own test package, not from tests living in
+      # their own package. Without -coverpkg, `go test` only attributes
+      # coverage to the package a test file lives in, so those
+      # cross-package-only hits are silently dropped and SonarCloud sees
+      # 0% on files that are, in fact, tested.
       - name: go test with coverage
-        run: go test -coverprofile=coverage.out ./...
+        run: go test -coverprofile=coverage.out -coverpkg=./... ./...
 
       - name: SonarQube Scan
         uses: SonarSource/sonarqube-scan-action@7006c4492b2e0ee0f816d36501671557c97f5995  # v8.1.0
