@@ -18,14 +18,19 @@ func newTestService(t *testing.T) *Service {
 	return NewService("https://verifier.example", testSigningKey(t), session.NewStore(), ResponseModeDirectPost)
 }
 
+// singleCredentialRequest is the one-credential PID request every
+// single-credential test below uses — factored out for the same reason as
+// pidAndPadroCredentials (see its doc comment).
+func singleCredentialRequest() []CredentialRequest {
+	return []CredentialRequest{
+		{ID: "requested_credential", CredentialType: "eu.europa.ec.eudi.pid.1", Claims: []string{"given_name"}, Format: FormatSDJWTVC},
+	}
+}
+
 func TestCreateSessionAndGetRequestObjectSingleCredential(t *testing.T) {
 	svc := newTestService(t)
 
-	result, err := svc.CreateSession(CreateSessionRequest{
-		Credentials: []CredentialRequest{
-			{ID: "requested_credential", CredentialType: "eu.europa.ec.eudi.pid.1", Claims: []string{"given_name"}, Format: FormatSDJWTVC},
-		},
-	})
+	result, err := svc.CreateSession(CreateSessionRequest{Credentials: singleCredentialRequest()})
 	if err != nil {
 		t.Fatalf("CreateSession: %v", err)
 	}
@@ -56,6 +61,23 @@ func TestGetRequestObjectUnknownSessionFails(t *testing.T) {
 	}
 }
 
+// createSingleCredentialSession creates a session requesting
+// singleCredentialRequest and returns both the CreateSession result and
+// the session's own nonce (needed to build a matching KB-JWT) — the
+// single-credential counterpart of createMultiCredentialSession.
+func createSingleCredentialSession(t *testing.T, svc *Service) (CreateSessionResult, string) {
+	t.Helper()
+	created, err := svc.CreateSession(CreateSessionRequest{Credentials: singleCredentialRequest()})
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	sess, ok := svc.sessions.FindVerification(created.SessionID)
+	if !ok {
+		t.Fatal("session not found after creation")
+	}
+	return created, sess.Nonce
+}
+
 // TestHandleResponseSingleCredentialEndToEnd exercises the full
 // single-credential path: CreateSession builds the DCQL query and nonce,
 // a wallet-shaped SD-JWT VC presentation is built against that exact
@@ -66,18 +88,7 @@ func TestHandleResponseSingleCredentialEndToEnd(t *testing.T) {
 	issuer := newTestIssuerKey(t)
 	holderPriv, holderPub := testHolderKey(t)
 
-	created, err := svc.CreateSession(CreateSessionRequest{
-		Credentials: []CredentialRequest{
-			{ID: "requested_credential", CredentialType: "eu.europa.ec.eudi.pid.1", Claims: []string{"given_name"}, Format: FormatSDJWTVC},
-		},
-	})
-	if err != nil {
-		t.Fatalf("CreateSession: %v", err)
-	}
-	sess, ok := svc.sessions.FindVerification(created.SessionID)
-	if !ok {
-		t.Fatal("session not found after creation")
-	}
+	created, nonce := createSingleCredentialSession(t, svc)
 
 	presentation := buildSDJWTPresentation(t, issuer, sdJWTPresentationOpts{
 		vct:             "eu.europa.ec.eudi.pid.1",
@@ -85,7 +96,7 @@ func TestHandleResponseSingleCredentialEndToEnd(t *testing.T) {
 		holderPublicJWK: holderPub,
 		holderPrivKey:   holderPriv,
 		audience:        created.ClientID,
-		nonce:           sess.Nonce,
+		nonce:           nonce,
 	})
 
 	result, respSession, err := svc.HandleResponse(context.Background(), ResponseRequest{
@@ -309,11 +320,7 @@ func TestHandleResponseWrongStateFails(t *testing.T) {
 
 func TestHandleResponseMissingVPTokenFails(t *testing.T) {
 	svc := newTestService(t)
-	created, err := svc.CreateSession(CreateSessionRequest{
-		Credentials: []CredentialRequest{
-			{ID: "requested_credential", CredentialType: "eu.europa.ec.eudi.pid.1", Claims: []string{"given_name"}, Format: FormatSDJWTVC},
-		},
-	})
+	created, err := svc.CreateSession(CreateSessionRequest{Credentials: singleCredentialRequest()})
 	if err != nil {
 		t.Fatalf("CreateSession: %v", err)
 	}
@@ -325,11 +332,7 @@ func TestHandleResponseMissingVPTokenFails(t *testing.T) {
 
 func TestGetResultPendingBeforePresentation(t *testing.T) {
 	svc := newTestService(t)
-	created, err := svc.CreateSession(CreateSessionRequest{
-		Credentials: []CredentialRequest{
-			{ID: "requested_credential", CredentialType: "eu.europa.ec.eudi.pid.1", Claims: []string{"given_name"}, Format: FormatSDJWTVC},
-		},
-	})
+	created, err := svc.CreateSession(CreateSessionRequest{Credentials: singleCredentialRequest()})
 	if err != nil {
 		t.Fatalf("CreateSession: %v", err)
 	}
