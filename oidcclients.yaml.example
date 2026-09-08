@@ -3,7 +3,7 @@
 # AS's /oidc/v1/* endpoints as their login method.
 #
 # Copy this file, fill in real redirect_uris, and point OIDC_CLIENTS_PATH
-# at it. Field names follow RFC 7591 (OAuth 2.0 Dynamic Client
+# at it. Client field names follow RFC 7591 (OAuth 2.0 Dynamic Client
 # Registration Protocol) §2 — the standard vocabulary, not any one
 # vendor's own registry file shape.
 #
@@ -11,10 +11,9 @@
 # need no registry entry at all (see internal/oidcclients's package doc).
 
 clients:
-  # Decidim's own login, per the Barcelona padró demo: presenting the
-  # residency attestation logs the citizen in AND authorizes them, in one
-  # step, without disclosing any claim to Decidim — see verifier_claims
-  # below.
+  # A single Decidim installation's login. Which credential a given login
+  # presents is NOT fixed here — see credential_scopes below, and
+  # internal/oidcclients's package doc for why (OpenID4VP 1.0 §5.5).
   - client_id: decidim-barcelona
     # Public client: PKCE (S256, mandatory for every client this AS
     # registers) replaces a shared client_secret. No secret is issued or
@@ -23,9 +22,23 @@ clients:
     redirect_uris:
       - "https://decidim.fikua.com/users/auth/fikua_verifier/callback"
     scope: "openid"
-    # Which OID4VP credential this client's login flow requests.
-    verifier_credential_type: "urn:fikua:padro:barcelona:1"
-    # Empty is deliberate, not a placeholder to fill in: this client only
-    # ever learns a stable pseudonymous `sub`, never any disclosed claim
-    # — see internal/oidcclients.Client.VerifierClaims's doc comment.
-    verifier_claims: []
+
+# Per OpenID4VP 1.0 §5.5 ("Using Scope Parameter to Request
+# Presentations"): each entry here is a scope value a Relying Party's own
+# /authorize request may name to select which credential that particular
+# login presents. This is deliberately NOT tied to a specific client —
+# the SAME client_id above can request a Barcelona padró for one
+# participatory process and a Girona padró for another purely by naming
+# a different scope in each /authorize call, with no separate client
+# registration per credential/locality.
+credential_scopes:
+  - name: padro_barcelona
+    credential_type: "urn:fikua:padro:barcelona:1"
+    # Empty is deliberate, not a placeholder to fill in: a login using
+    # this scope only ever learns a stable pseudonymous `sub`, never any
+    # disclosed claim — see CredentialScope.Claims's doc comment.
+    claims: []
+
+  - name: padro_girona
+    credential_type: "urn:fikua:padro:girona:1"
+    claims: []

@@ -55,7 +55,7 @@ func (s *Storage) client(clientID string) (*client, error) {
 	if !ok {
 		return nil, oidc.ErrInvalidClient().WithDescription("unknown client_id")
 	}
-	return &client{cfg: cfg, loginBasePath: s.loginBasePath}, nil
+	return &client{cfg: cfg, loginBasePath: s.loginBasePath, registry: s.clients}, nil
 }
 
 // --- AuthStorage ---

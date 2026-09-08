@@ -87,12 +87,22 @@ func (h *LoginHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	rpClient, ok := h.clients.Lookup(ar.clientID)
-	if !ok {
+	if _, ok := h.clients.Lookup(ar.clientID); !ok {
 		// Cannot happen through op's own flow (CreateAuthRequest already
 		// validated the client), but this handler is reachable directly
 		// by URL, so it re-checks rather than trusting the query string.
 		http.Error(w, "unknown client", http.StatusBadRequest)
+		return
+	}
+
+	// Per OpenID4VP 1.0 §5.5, the AuthRequest's own scope names which
+	// credential this login presents — see oidcclients.Registry.
+	// ResolveCredentialScope's doc comment for why this is resolved
+	// against a bridge-published catalogue rather than fixed on the
+	// client's own registration.
+	credentialScope, ok := h.clients.ResolveCredentialScope(ar.scopes)
+	if !ok {
+		http.Error(w, "the requested scope names no known credential to present", http.StatusBadRequest)
 		return
 	}
 
@@ -101,8 +111,8 @@ func (h *LoginHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		result, err := h.verifier.CreateSession(verifier.CreateSessionRequest{
 			Credentials: []verifier.CredentialRequest{{
 				ID:             "requested_credential",
-				CredentialType: rpClient.VerifierCredentialType,
-				Claims:         rpClient.VerifierClaims,
+				CredentialType: credentialScope.CredentialType,
+				Claims:         credentialScope.Claims,
 			}},
 		})
 		if err != nil {
