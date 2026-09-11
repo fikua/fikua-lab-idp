@@ -25,10 +25,10 @@ func TestWithCORSSetsHeadersOnOrdinaryRequest(t *testing.T) {
 	if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "*" {
 		t.Errorf("Access-Control-Allow-Origin = %q, want \"*\"", got)
 	}
-	if got := rec.Header().Get("Access-Control-Allow-Methods"); got == "" {
+	if rec.Header().Get("Access-Control-Allow-Methods") == "" {
 		t.Error("Access-Control-Allow-Methods must be set")
 	}
-	if got := rec.Header().Get("Access-Control-Allow-Headers"); got == "" {
+	if rec.Header().Get("Access-Control-Allow-Headers") == "" {
 		t.Error("Access-Control-Allow-Headers must be set")
 	}
 	if rec.Code != http.StatusOK {
