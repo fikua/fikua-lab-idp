@@ -292,12 +292,15 @@ func (s *Service) HandleAuthorize(ctx context.Context, requestURI, queryClientID
 	// cookie minted for a different request_uri, see
 	// session.Store.CheckIdentified's doc comment for why) means
 	// identification already happened and this is the legitimate second
-	// visit: consume request_uri for real now and complete the response.
-	if identifiedRecordID, identified := s.sessions.CheckIdentified(identifiedCookie, requestURI); identified {
-		params, ok = s.sessions.ConsumeParRequest(requestURI)
-		if !ok {
-			return AuthorizeResult{}, oauth2.BadRequest(oauth2.InvalidRequest, "Invalid or expired request_uri")
-		}
+	// visit: complete the response using the params CheckIdentified
+	// already carries — NOT a fresh ConsumeParRequest, which would
+	// re-check parRequestTTL's 60s window from the ORIGINAL PAR request,
+	// almost always already elapsed by the time a human finishes filling
+	// in the identification form (see identifiedSessionEntry's doc
+	// comment). identifiedSessionTTL is the only clock this leg is
+	// bound by.
+	if identifiedRecordID, identifiedParams, identified := s.sessions.CheckIdentified(identifiedCookie, requestURI); identified {
+		params = identifiedParams
 		code := s.sessions.CreateAuthCode(session.Data{
 			SessionID: session.RandomToken(16),
 			Metadata:  authCodeMetadata(identifiedRecordID, params),
@@ -400,12 +403,14 @@ func (s *Service) CompleteIdentification(ctx context.Context, sessionToken strin
 		return "", "", oauth2.ServiceUnavailable(oauth2.InvalidRequest, "Credential Issuer unreachable: "+err.Error())
 	}
 
-	// rec.ID travels to the second /authorize visit via the identified
-	// session entry itself (session.Store.CheckIdentified returns it) —
-	// that visit has no issuer_state PAR param of its own to resolve an
-	// issuance record from, since this whole branch only exists for
-	// requests that never had one.
-	cookieValue = s.sessions.MarkIdentified(requestURI, rec.ID)
+	// rec.ID and the original PAR params both travel to the second
+	// /authorize visit via the identified session entry itself
+	// (session.Store.CheckIdentified returns both) — that visit has no
+	// issuer_state PAR param of its own to resolve an issuance record
+	// from, since this whole branch only exists for requests that never
+	// had one, and must not re-fetch params from parRequests (see
+	// identifiedSessionEntry's doc comment for why).
+	cookieValue = s.sessions.MarkIdentified(requestURI, rec.ID, params)
 	redirect = s.baseURL + "/oid4vci/v1/authorize?request_uri=" + url.QueryEscape(requestURI)
 
 	s.sessions.StoreIdentifyReplay(sessionToken, redirect)
