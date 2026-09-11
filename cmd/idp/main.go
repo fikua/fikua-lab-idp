@@ -71,7 +71,7 @@ func main() {
 	}
 
 	log.Printf("fikua-lab-idp listening on %s (issuing access tokens for %s)", cfg.Addr, cfg.CredentialIssuerURL)
-	if err := http.ListenAndServe(cfg.Addr, mux); err != nil {
+	if err := http.ListenAndServe(cfg.Addr, httpapi.WithCORS(mux)); err != nil {
 		log.Fatal(err)
 	}
 }
