@@ -114,6 +114,12 @@ type CredentialConfig struct {
 type Claim struct {
 	Path    []string       `json:"path"`
 	Display []ClaimDisplay `json:"display,omitempty"`
+	// Mandatory mirrors the attestation-registry scheme's own presence
+	// declaration, passed through unchanged from the Credential Issuer's
+	// metadata. The identification UI (web/static/app.js) uses this to
+	// decide which fields to require — see identifyClaims's doc comment
+	// for why no claim metadata is hardcoded here or downstream.
+	Mandatory bool `json:"mandatory"`
 }
 
 // ClaimDisplay is one locale's label for a claim.
