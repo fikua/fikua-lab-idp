@@ -25,6 +25,15 @@
 # front. DNS-only (not Cloudflare-proxied), for the same FAPI 2.0 TLS
 # conformance reason as the issuer — see the traefik labels below and
 # fikua-platform-iac/tofu/cloudflare-fikua-com.tf.
+#
+# name: groups this service under "fikua-digital-identity-lab" in
+# Docker/Dozzle, alongside every other Fikua Lab service — each still
+# deploys independently via its own deploy.yml, this only sets the
+# com.docker.compose.project label (which otherwise defaults to the
+# working directory name, giving every service its own project and no
+# shared grouping in Dozzle).
+
+name: fikua-digital-identity-lab
 
 services:
   fikua-lab-idp:
