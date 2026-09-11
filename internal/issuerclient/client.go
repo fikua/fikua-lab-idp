@@ -120,6 +120,11 @@ type Claim struct {
 	// decide which fields to require — see identifyClaims's doc comment
 	// for why no claim metadata is hardcoded here or downstream.
 	Mandatory bool `json:"mandatory"`
+	// IsDate mirrors whether the claim's own DataType describes a
+	// calendar date, passed through unchanged from the Credential
+	// Issuer's metadata. The identification UI uses this to render a
+	// date input, instead of a hardcoded field-name list.
+	IsDate bool `json:"is_date,omitempty"`
 }
 
 // ClaimDisplay is one locale's label for a claim.
