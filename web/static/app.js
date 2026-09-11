@@ -22,15 +22,6 @@
     // Fields auto-filled by the issuer (not shown in forms)
     const BACKEND_FIELDS = ['issuing_authority', 'issuing_country'];
 
-    // The PID scheme defines ~18 claims total, most of them optional
-    // attributes (sex, email, personal_administrative_number,
-    // trust_anchor, attestation_legal_category, ...) that don't make
-    // sense to demand from a manually-identifying user — only these
-    // core identity fields are required; every other claim the backend
-    // returns is still shown (so the wallet gets whatever the user
-    // chooses to fill in) but left optional.
-    const REQUIRED_FIELDS = ['given_name', 'family_name', 'birthdate'];
-
     const params = new URLSearchParams(window.location.search);
     const sessionToken = params.get('session');
 
@@ -69,7 +60,11 @@
             var label = (claim.display && claim.display[0]) ? claim.display[0].name : fieldName;
             var inputType = (fieldName === 'birthdate' || fieldName === 'birth_date' || fieldName === 'date_of_expiry' || fieldName === 'date_of_issuance') ? 'date' : 'text';
             var prefillValue = (prefill && prefill[fieldName]) ? prefill[fieldName] : '';
-            var isRequired = REQUIRED_FIELDS.indexOf(fieldName) !== -1;
+            // Whether this field is required comes from the credential's own
+            // scheme (attestation-registry's presence declaration, passed
+            // through by the issuer and this AS) — not a fixed list, so the
+            // same form works for any credential type this AS ever asks for.
+            var isRequired = !!claim.mandatory;
 
             var group = document.createElement('div');
             group.className = 'form-group';
@@ -203,10 +198,13 @@
         })
         .catch(function(err) {
             console.warn('Could not fetch claims metadata, using fallback', err);
+            // Only reached if /identify/claims itself is unreachable — a
+            // generic minimal-identity fallback, not tied to any one
+            // credential's schema, so it stays deliberately PID-shaped.
             claimsMetadata = [
-                { path: ['given_name'], display: [{ name: 'Given Name', locale: 'en' }] },
-                { path: ['family_name'], display: [{ name: 'Surname', locale: 'en' }] },
-                { path: ['birth_date'], display: [{ name: 'Date of Birth', locale: 'en' }] }
+                { path: ['given_name'], display: [{ name: 'Given Name', locale: 'en' }], mandatory: true },
+                { path: ['family_name'], display: [{ name: 'Surname', locale: 'en' }], mandatory: true },
+                { path: ['birth_date'], display: [{ name: 'Date of Birth', locale: 'en' }], mandatory: true }
             ];
         })
         .then(function() {
