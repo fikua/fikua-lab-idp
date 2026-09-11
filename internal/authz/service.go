@@ -42,11 +42,26 @@ const pendingRequestURIKey = "_pending_request_uri"
 // name on both ends without duplicating the literal.
 const IdentifiedCookieName = "fikua_idp_identified"
 
-// PIDConfigID is the credential_configuration_id the identification form
-// collects claims for. This ecosystem only issues PID today — kept as a
-// constant in one place so a future scope-to-config mapping has somewhere
-// to live.
-const PIDConfigID = "urn:eudi:pid:1"
+// identifiedScope returns the credential_configuration_id a pending
+// authorization's own params identify — its `scope`. Every
+// HAIP-conformant wallet sends scope=<the credential_configuration_id it
+// wants> on its PAR request (see fikua-lab-wallet's executeAuthCodeFlow,
+// `scope: configId`). There is no fallback: a request with no scope (or
+// one the issuer doesn't recognize) must fail loudly here rather than
+// silently identifying the user for whatever credential a fallback
+// happened to name — that would let the identification form and the
+// issuance record disagree about which credential is actually being
+// issued. Centralizing this one lookup keeps ResolveIdentifyScope (the
+// identification form's claim metadata) and CompleteIdentification (the
+// issuance record actually created) from ever disagreeing about which
+// credential is being identified for.
+func identifiedScope(params map[string]string) (string, error) {
+	scope := params["scope"]
+	if scope == "" {
+		return "", oauth2.BadRequest(oauth2.InvalidRequest, "Missing scope: cannot determine which credential is being identified for")
+	}
+	return scope, nil
+}
 
 // requestURIPrefix is the PAR request_uri format prefix, per RFC 9126.
 const requestURIPrefix = "urn:ietf:params:oauth:request_uri:"
@@ -327,10 +342,11 @@ func authCodeMetadata(recordID string, params map[string]string) map[string]any 
 // credential_configuration_id the identification form should collect
 // claims for.
 func (s *Service) ResolveIdentifyScope(sessionToken string) (credentialConfigID string, err error) {
-	if _, ok := s.sessions.GetPendingAuth(sessionToken); !ok {
+	params, ok := s.sessions.GetPendingAuth(sessionToken)
+	if !ok {
 		return "", oauth2.BadRequest(oauth2.InvalidRequest, "Invalid or expired identification session")
 	}
-	return PIDConfigID, nil
+	return identifiedScope(params)
 }
 
 // CompleteIdentification implements POST /identify/complete. It no
@@ -370,8 +386,12 @@ func (s *Service) CompleteIdentification(ctx context.Context, sessionToken strin
 		return "", "", oauth2.BadRequest(oauth2.InvalidRequest, "Identification session is missing its request_uri")
 	}
 
+	scope, err := identifiedScope(params)
+	if err != nil {
+		return "", "", err
+	}
 	rec, err := s.issuer.Create(ctx, issuerclient.CreateRequest{
-		CredentialType: PIDConfigID,
+		CredentialType: scope,
 		CredentialData: credentialData,
 		SourceType:     sourceType,
 		SourceRef:      sourceRef,
