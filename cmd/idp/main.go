@@ -9,10 +9,10 @@ import (
 	"log"
 	"net/http"
 
+	cscclient "github.com/fikua/fikua-dss-csc-client-go"
 	"github.com/fikua/fikua-lab-idp/internal/authz"
 	"github.com/fikua/fikua-lab-idp/internal/config"
 	fikuacrypto "github.com/fikua/fikua-lab-idp/internal/crypto"
-	"github.com/fikua/fikua-lab-idp/internal/cscclient"
 	"github.com/fikua/fikua-lab-idp/internal/httpapi"
 	"github.com/fikua/fikua-lab-idp/internal/issuerclient"
 	"github.com/fikua/fikua-lab-idp/internal/oauth2"
