@@ -58,7 +58,10 @@
             if (BACKEND_FIELDS.indexOf(fieldName) !== -1) return;
 
             var label = (claim.display && claim.display[0]) ? claim.display[0].name : fieldName;
-            var inputType = (fieldName === 'birthdate' || fieldName === 'birth_date' || fieldName === 'date_of_expiry' || fieldName === 'date_of_issuance') ? 'date' : 'text';
+            // Whether this field is a date comes from the credential's own
+            // scheme (its DataType), not a fixed field-name list, so the
+            // same form works for any credential type this AS ever asks for.
+            var inputType = claim.is_date ? 'date' : 'text';
             var prefillValue = (prefill && prefill[fieldName]) ? prefill[fieldName] : '';
             // Whether this field is required comes from the credential's own
             // scheme (attestation-registry's presence declaration, passed
@@ -204,7 +207,7 @@
             claimsMetadata = [
                 { path: ['given_name'], display: [{ name: 'Given Name', locale: 'en' }], mandatory: true },
                 { path: ['family_name'], display: [{ name: 'Surname', locale: 'en' }], mandatory: true },
-                { path: ['birth_date'], display: [{ name: 'Date of Birth', locale: 'en' }], mandatory: true }
+                { path: ['birth_date'], display: [{ name: 'Date of Birth', locale: 'en' }], mandatory: true, is_date: true }
             ];
         })
         .then(function() {
