@@ -551,9 +551,13 @@ func (s *Store) ConsumePendingAuth(token string) (params map[string]string, ok b
 
 // identifiedSessionTTL bounds how long a completed identification stays
 // good for the follow-up /authorize visit that actually completes the
-// OAuth2 response. Matches parRequestTTL: there is no reason for this
-// leg of the flow to outlive the request_uri it's bound to.
-const identifiedSessionTTL = parRequestTTL
+// OAuth2 response. Deliberately much longer than parRequestTTL: unlike
+// the original PAR request_uri (RFC 9126 §2.2's own short-lived, machine
+// -to-machine exchange), this leg spans a real end user reading and
+// filling in the identification form by hand, which routinely takes
+// well past 60s. Bounded well below authCodeTTL's own follow-up step so
+// a completed identification can't be replayed indefinitely.
+const identifiedSessionTTL = 10 * time.Minute
 
 // identifiedSessionEntry is a completed identification, bound to the one
 // request_uri it was identified for — see CheckIdentified for why the
@@ -562,51 +566,64 @@ const identifiedSessionTTL = parRequestTTL
 // the second /authorize visit that finishes the OAuth2 response has no
 // issuer_state of its own to resolve it from (that PAR param is only
 // ever present on the separate Credential-Issuer-initiated fast path).
+// Params is the original PAR request's own params, carried here rather
+// than re-read from parRequests: by the time a human finishes the
+// identification form, the original request_uri's own parRequestTTL
+// (60s, RFC 9126-mandated short lifetime) has near-certainly elapsed,
+// so the second /authorize visit must not re-check it against that
+// short clock — only identifiedSessionTTL governs this leg.
 type identifiedSessionEntry struct {
 	RequestURI string
 	RecordID   string
+	Params     map[string]string
 	CreatedAt  time.Time
 }
 
 // MarkIdentified records that requestURI's identification succeeded
-// against recordID and returns a fresh opaque cookie value naming that
-// fact, valid for identifiedSessionTTL. Called by CompleteIdentification
-// instead of minting the authorization code directly — the code is only
-// minted when this cookie later comes back to /authorize bound to the
-// same request_uri (see CheckIdentified), which is what makes that
-// second /authorize call, and not the /identify/complete POST, the one
-// the FAPI conformance test observes completing the authorization.
-func (s *Store) MarkIdentified(requestURI, recordID string) (cookieValue string) {
+// against recordID, carrying params (the original PAR request's own
+// params) forward for the second /authorize visit to use — see
+// identifiedSessionEntry's doc comment for why that visit must not
+// re-fetch them from parRequests. Returns a fresh opaque cookie value
+// naming that fact, valid for identifiedSessionTTL. Called by
+// CompleteIdentification instead of minting the authorization code
+// directly — the code is only minted when this cookie later comes back
+// to /authorize bound to the same request_uri (see CheckIdentified),
+// which is what makes that second /authorize call, and not the
+// /identify/complete POST, the one the FAPI conformance test observes
+// completing the authorization.
+func (s *Store) MarkIdentified(requestURI, recordID string, params map[string]string) (cookieValue string) {
 	cookieValue = RandomToken(24)
 	s.mu.Lock()
-	s.identifiedSessions[cookieValue] = identifiedSessionEntry{RequestURI: requestURI, RecordID: recordID, CreatedAt: time.Now()}
+	s.identifiedSessions[cookieValue] = identifiedSessionEntry{RequestURI: requestURI, RecordID: recordID, Params: params, CreatedAt: time.Now()}
 	s.mu.Unlock()
 	return cookieValue
 }
 
 // CheckIdentified reports whether cookieValue names a live, unexpired
-// identification for exactly requestURI, returning the issuance record it
-// was identified against. The exact request_uri match is the anti-leakage
-// property this whole mechanic depends on: two conformance tests (or two
-// wallets) running their identification flows around the same time must
-// never have test/wallet A's completed session satisfy test/wallet B's
-// /authorize call for a different request_uri, even though both sessions
-// are simultaneously live in this same map. Lazy expiry on read, matching
-// this store's no-background-sweeper style (see identifyReplayTTL's
-// GetIdentifyReplay for the same pattern) — the entry is left in place
-// either way since nothing but memory is at stake and a caller will not
-// retry across process restarts.
-func (s *Store) CheckIdentified(cookieValue, requestURI string) (recordID string, ok bool) {
+// identification for exactly requestURI, returning the issuance record
+// it was identified against and the original PAR request's own params
+// (see identifiedSessionEntry's doc comment for why the caller must use
+// these instead of re-fetching from parRequests). The exact request_uri
+// match is the anti-leakage property this whole mechanic depends on: two
+// conformance tests (or two wallets) running their identification flows
+// around the same time must never have test/wallet A's completed session
+// satisfy test/wallet B's /authorize call for a different request_uri,
+// even though both sessions are simultaneously live in this same map.
+// Lazy expiry on read, matching this store's no-background-sweeper style
+// (see identifyReplayTTL's GetIdentifyReplay for the same pattern) — the
+// entry is left in place either way since nothing but memory is at stake
+// and a caller will not retry across process restarts.
+func (s *Store) CheckIdentified(cookieValue, requestURI string) (recordID string, params map[string]string, ok bool) {
 	if cookieValue == "" {
-		return "", false
+		return "", nil, false
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	entry, found := s.identifiedSessions[cookieValue]
 	if !found || time.Since(entry.CreatedAt) > identifiedSessionTTL || entry.RequestURI != requestURI {
-		return "", false
+		return "", nil, false
 	}
-	return entry.RecordID, true
+	return entry.RecordID, entry.Params, true
 }
 
 // identifyReplayTTL bounds how long a completed /identify/complete
