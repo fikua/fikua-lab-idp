@@ -18,12 +18,19 @@ import (
 	"github.com/fikua/fikua-lab-idp/internal/oauth2"
 	"github.com/fikua/fikua-lab-idp/internal/oidcserver"
 	"github.com/fikua/fikua-lab-idp/internal/session"
+	"github.com/fikua/fikua-lab-idp/internal/telemetry"
 	"github.com/fikua/fikua-lab-idp/internal/verifier"
 	"github.com/fikua/fikua-lab-idp/internal/webui"
 	"github.com/fikua/fikua-lab-idp/web"
 )
 
 func main() {
+	shutdownTelemetry, telErr := telemetry.Setup(context.Background(), "fikua-lab-idp")
+	if telErr != nil {
+		log.Fatalf("telemetry: %v", telErr)
+	}
+	defer func() { _ = shutdownTelemetry(context.Background()) }()
+
 	cfg := config.Load()
 
 	signingKey, err := fikuacrypto.LoadFromPEM(cfg.CertsDir)
@@ -71,7 +78,7 @@ func main() {
 	}
 
 	log.Printf("fikua-lab-idp listening on %s (issuing access tokens for %s)", cfg.Addr, cfg.CredentialIssuerURL)
-	if err := http.ListenAndServe(cfg.Addr, httpapi.WithCORS(mux)); err != nil {
+	if err := http.ListenAndServe(cfg.Addr, telemetry.HTTPHandler(httpapi.WithCORS(mux))); err != nil {
 		log.Fatal(err)
 	}
 }

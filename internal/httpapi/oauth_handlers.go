@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/fikua/fikua-lab-idp/internal/audit"
 	"github.com/fikua/fikua-lab-idp/internal/authz"
 	"github.com/fikua/fikua-lab-idp/internal/oauth2"
 )
@@ -69,12 +70,14 @@ func (h *Handler) token(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Cache-Control", "no-store")
 	if !req.IsAuthorizationCode() {
+		audit.TokenRejected(r.Context(), string(oauth2.UnsupportedGrantType))
 		writeOAuthError(w, oauth2.BadRequest(oauth2.UnsupportedGrantType, "Only the authorization_code grant is supported"))
 		return
 	}
 
 	dpopHeader, err := oauth2.SingleDPoPHeader(r.Header.Values("DPoP"))
 	if err != nil {
+		audit.TokenRejected(r.Context(), oauthErrorCode(err))
 		writeOAuthError(w, err)
 		return
 	}
@@ -82,9 +85,11 @@ func (h *Handler) token(w http.ResponseWriter, r *http.Request) {
 
 	resp, err := h.authz.HandleAuthCodeToken(req, dpopHeader, wiaHeader, popHeader)
 	if err != nil {
+		audit.TokenRejected(r.Context(), oauthErrorCode(err))
 		writeOAuthError(w, err)
 		return
 	}
+	audit.TokenIssued(r.Context(), req.ClientID)
 	writeJSON(w, http.StatusOK, resp)
 }
 
@@ -145,6 +150,7 @@ func (h *Handler) identifyComplete(w http.ResponseWriter, r *http.Request) {
 	if cookieValue != "" {
 		h.setIdentifiedCookie(w, cookieValue)
 	}
+	audit.IdentityVerified(r.Context())
 	writeJSON(w, http.StatusOK, map[string]string{"redirect": redirect})
 }
 
@@ -211,6 +217,7 @@ func (h *Handler) identifyReject(w http.ResponseWriter, r *http.Request) {
 		writeOAuthError(w, err)
 		return
 	}
+	audit.IdentityRejected(r.Context())
 	writeJSON(w, http.StatusOK, map[string]string{"redirect": redirect})
 }
 
@@ -234,6 +241,15 @@ func parseForm(r *http.Request) (map[string]string, error) {
 // header-based client attestation.
 func clientAttestationHeaders(r *http.Request) (wia, pop string) {
 	return r.Header.Get(oauth2.HeaderClientAttestation), r.Header.Get(oauth2.HeaderClientAttestationPoP)
+}
+
+// oauthErrorCode is the stable OAuth2 error code of err, for the audit event
+// and the business counter; never its description.
+func oauthErrorCode(err error) string {
+	if exc, ok := err.(*oauth2.Exception); ok {
+		return string(exc.Err.Code)
+	}
+	return "server_error"
 }
 
 func writeOAuthError(w http.ResponseWriter, err error) {
