@@ -1,0 +1,52 @@
+name: CI
+
+# Shared workflows: fikua/fikua-ci-workflows (ADR 0018). Publishes
+# ghcr.io/fikua/fikua-lab-idp as latest and sha-<short> on every push to main and as
+# X.Y.Z on every release (gh release create vX.Y.Z), once the tests pass.
+#
+# Deploying is not done here: fikua-platform-iac pins the version in the
+# project's compose.yaml and Dependabot there proposes each new X.Y.Z
+# (ADR 0019).
+on:
+  push:
+    branches: [main]
+    paths-ignore: ['**.md']
+  pull_request:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    uses: fikua/fikua-ci-workflows/.github/workflows/go-ci.yml@617baa88c2f37b53b84a9024f72298da1caa35cf  # v1.3.0
+    with:
+      test-command: go test ./...
+
+  gitleaks:
+    if: github.event_name == 'push' || github.event_name == 'pull_request'
+    uses: fikua/fikua-ci-workflows/.github/workflows/gitleaks.yml@617baa88c2f37b53b84a9024f72298da1caa35cf  # v1.3.0
+
+  sonar:
+    if: github.event_name == 'push' || github.event_name == 'pull_request'
+    permissions:
+      contents: read
+      pull-requests: read
+    uses: fikua/fikua-ci-workflows/.github/workflows/sonar.yml@617baa88c2f37b53b84a9024f72298da1caa35cf  # v1.3.0
+    secrets:
+      SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+
+  release:
+    needs: test
+    if: github.event_name != 'pull_request'
+    permissions:
+      contents: read
+      packages: write
+    uses: fikua/fikua-ci-workflows/.github/workflows/image-release.yml@617baa88c2f37b53b84a9024f72298da1caa35cf  # v1.3.0
+    with:
+      image: fikua-lab-idp
+    secrets:
+      DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
+      DOCKER_TOKEN: ${{ secrets.DOCKER_TOKEN }}
