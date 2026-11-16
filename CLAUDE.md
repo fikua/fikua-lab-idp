@@ -35,9 +35,8 @@ flow behind /authorize.
   middleware injecting `X-Forwarded-Tls-Client-Cert-Info`, which nginx
   echoed back and the page parsed itself. Replicating it needs an
   mTLS-terminating route for *this* service first — IaC work, not Go work.
-- **Deployment.** No `compose.yaml`, no `.github/workflows/` yet. Follow
-  `fikua-lab-issuer`'s pipeline shape when adding them, sourcing the
-  compose file from `fikua-platform-iac/projects/fikua-lab-idp/`.
+- **Deployment.** Lives only in `fikua-platform-iac/projects/fikua-lab-idp/`
+  (compose file, pinned release, Dependabot); this repo keeps no copy.
 
 ## Architecture
 
