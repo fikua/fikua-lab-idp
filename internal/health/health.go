@@ -10,6 +10,7 @@
 package health
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -18,6 +19,7 @@ import (
 	"net/url"
 	"os"
 	"sort"
+	"syscall"
 	"time"
 )
 
@@ -102,3 +104,36 @@ func Probe(listenAddr string) int {
 
 // IsHealthcheck reports whether the process was started as "<binary> healthcheck".
 func IsHealthcheck() bool { return len(os.Args) > 1 && os.Args[1] == "healthcheck" }
+
+// ErrNoProgram means PID 1's program could not be determined, or is the
+// healthcheck command itself.
+var ErrNoProgram = errors.New("health: cannot tell which program is PID 1")
+
+// ProgramOf returns the program of a /proc/<pid>/cmdline (NUL-separated
+// arguments), refusing self so the healthcheck never runs itself.
+func ProgramOf(cmdline []byte, self string) (string, error) {
+	prog := string(bytes.SplitN(cmdline, []byte{0}, 2)[0])
+	if prog == "" || prog == self {
+		return "", ErrNoProgram
+	}
+	return prog, nil
+}
+
+// RunForPID1 is the image's HEALTHCHECK: an image may hold several binaries
+// and the compose file picks one as the entrypoint, so it replaces itself with
+// "<program of PID 1> healthcheck", which probes that binary's own port. It
+// returns only on failure, with the exit code to use.
+func RunForPID1() int { return runFor("/proc/1/cmdline", os.Args[0], syscall.Exec) }
+
+func runFor(cmdlinePath, self string, exec func(string, []string, []string) error) int {
+	cmdline, err := os.ReadFile(cmdlinePath)
+	if err != nil {
+		return 1
+	}
+	prog, err := ProgramOf(cmdline, self)
+	if err != nil {
+		return 1
+	}
+	_ = exec(prog, []string{prog, "healthcheck"}, os.Environ())
+	return 1
+}

@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"testing"
 )
 
@@ -68,5 +69,60 @@ func TestProbe(t *testing.T) {
 	}
 	if got := Probe("not-an-addr"); got != 1 {
 		t.Fatalf("probe bad addr = %d", got)
+	}
+}
+
+func TestProgramOf(t *testing.T) {
+	cases := []struct {
+		cmdline, self, want string
+		err                 bool
+	}{
+		{"/panel\x00--flag\x00", "/healthcheck", "/panel", false},
+		{"/usr/local/bin/vitalia\x00", "/healthcheck", "/usr/local/bin/vitalia", false},
+		{"/healthcheck\x00", "/healthcheck", "", true},
+		{"", "/healthcheck", "", true},
+	}
+	for _, c := range cases {
+		got, err := ProgramOf([]byte(c.cmdline), c.self)
+		if got != c.want || (err != nil) != c.err {
+			t.Errorf("ProgramOf(%q) = %q, %v", c.cmdline, got, err)
+		}
+	}
+}
+
+func TestIsHealthcheck(t *testing.T) {
+	saved := os.Args
+	defer func() { os.Args = saved }()
+	os.Args = []string{"/panel", "healthcheck"}
+	if !IsHealthcheck() {
+		t.Fatal("healthcheck not detected")
+	}
+	os.Args = []string{"/panel"}
+	if IsHealthcheck() {
+		t.Fatal("plain start taken for healthcheck")
+	}
+}
+
+func TestRunFor(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name, content string) string {
+		p := dir + "/" + name
+		if err := os.WriteFile(p, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	var ran []string
+	exec := func(prog string, args, _ []string) error { ran = args; return errors.New("exec stubbed") }
+
+	if got := runFor(write("panel", "/panel\x00"), "/healthcheck", exec); got != 1 || len(ran) != 2 || ran[0] != "/panel" || ran[1] != "healthcheck" {
+		t.Fatalf("runFor = %d, ran %v", got, ran)
+	}
+	ran = nil
+	if got := runFor(write("self", "/healthcheck\x00"), "/healthcheck", exec); got != 1 || ran != nil {
+		t.Fatalf("self: %d %v", got, ran)
+	}
+	if got := runFor(dir+"/missing", "/healthcheck", exec); got != 1 || ran != nil {
+		t.Fatalf("missing: %d %v", got, ran)
 	}
 }
