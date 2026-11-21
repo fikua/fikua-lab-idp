@@ -8,11 +8,13 @@ import (
 	"io/fs"
 	"log"
 	"net/http"
+	"os"
 
 	cscclient "github.com/fikua/fikua-dss-csc-client-go"
 	"github.com/fikua/fikua-lab-idp/internal/authz"
 	"github.com/fikua/fikua-lab-idp/internal/config"
 	fikuacrypto "github.com/fikua/fikua-lab-idp/internal/crypto"
+	"github.com/fikua/fikua-lab-idp/internal/health"
 	"github.com/fikua/fikua-lab-idp/internal/httpapi"
 	"github.com/fikua/fikua-lab-idp/internal/issuerclient"
 	"github.com/fikua/fikua-lab-idp/internal/oauth2"
@@ -25,6 +27,9 @@ import (
 )
 
 func main() {
+	if health.IsHealthcheck() {
+		os.Exit(health.Probe(config.ListenAddr()))
+	}
 	shutdownTelemetry, telErr := telemetry.Setup(context.Background(), "fikua-lab-idp")
 	if telErr != nil {
 		log.Fatalf("telemetry: %v", telErr)
