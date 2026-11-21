@@ -13,6 +13,7 @@ import (
 
 	"github.com/fikua/fikua-lab-idp/internal/authz"
 	fikuacrypto "github.com/fikua/fikua-lab-idp/internal/crypto"
+	"github.com/fikua/fikua-lab-idp/internal/health"
 	"github.com/fikua/fikua-lab-idp/internal/issuerclient"
 	"github.com/fikua/fikua-lab-idp/internal/oauth2"
 	"github.com/fikua/fikua-lab-idp/internal/verifier"
@@ -85,7 +86,7 @@ func (h *Handler) Routes(mux *http.ServeMux) {
 }
 
 func (h *Handler) health(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	health.Handler("", nil)(w, r)
 }
 
 func (h *Handler) authServerMetadata(w http.ResponseWriter, r *http.Request) {
