@@ -15,6 +15,7 @@ import (
 	"errors"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"sort"
 	"time"
@@ -85,8 +86,10 @@ func Probe(listenAddr string) int {
 	if err != nil || port == "" {
 		return 1
 	}
+	// Plain HTTP on purpose: the probe never leaves the container (loopback).
+	u := url.URL{Scheme: "http", Host: net.JoinHostPort("127.0.0.1", port), Path: "/health"}
 	c := http.Client{Timeout: 4 * time.Second}
-	resp, err := c.Get("http://" + net.JoinHostPort("127.0.0.1", port) + "/health")
+	resp, err := c.Get(u.String())
 	if err != nil {
 		return 1
 	}
